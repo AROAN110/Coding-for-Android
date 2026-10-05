@@ -89,6 +89,10 @@ apk add python3 nodejs git vim …   # 想装什么就装什么
 
 欢迎通过 [Issues](https://github.com/AROAN110/Coding-for-Android/issues) 反馈问题，或通过 [Pull Requests](https://github.com/AROAN110/Coding-for-Android/pulls) 贡献代码。
 
+目前项目仍处于起步阶段，存在非常多的未完善功能，欢迎各位开发者集思广益，提一些pr或者issue
+
+我将会在issue里标明待完成的事项
+
 - 保持「最小底座」哲学：不打包臃肿工具链，一切按需。
 - 本项目采用 GPL-3.0 许可；提交贡献即表示同意以相同许可证分发。
 

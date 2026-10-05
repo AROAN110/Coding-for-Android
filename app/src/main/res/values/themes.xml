@@ -1,0 +1,7 @@
+<resources>
+    <!-- MVP 阶段仅用平台自带 Material 主题，避免额外依赖 -->
+    <style name="Theme.CodingForAndroid" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#1B1F23</item>
+        <item name="android:windowBackground">#1B1F23</item>
+    </style>
+</resources>

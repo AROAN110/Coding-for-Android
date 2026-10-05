@@ -1,0 +1,13 @@
+_cfa_ps() {
+  _p="$PWD"
+  _t=""
+  while [ ${#_p} -gt 36 ]; do
+    case "$_p" in
+      */*) _p="${_p#*/}"; _t=1 ;;
+      *) break ;;
+    esac
+  done
+  if [ "$_t" = 1 ]; then _p=".../$_p"; fi
+  PS1="\[\e[32m\]CfAndroid@root:${_p}\[\e[0m\]\[\e[37m\]#\[\e[0m\] "
+}
+PROMPT_COMMAND=_cfa_ps

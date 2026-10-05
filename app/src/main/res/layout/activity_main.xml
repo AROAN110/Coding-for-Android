@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- MVP 终端界面：环境横幅 + 全屏终端屏（点屏直输，无独立输入框） -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#1B1F23">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+    <!-- 环境标识条：显示当前所处环境（Alpine 容器 / Android su 主机） -->
+    <TextView
+        android:id="@+id/envBanner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="8dp"
+        android:textColor="#00E5A0"
+        android:textSize="12sp" />
+
+    <ScrollView
+        android:id="@+id/scrollView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true">
+
+        <com.AROAN110.CodingAndroid.terminal.TerminalScreenView
+            android:id="@+id/terminalScreen"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#1B1F23"
+            android:bufferType="spannable"
+            android:fontFamily="monospace"
+            android:padding="8dp"
+            android:textColor="#D8DEE9"
+            android:textSize="13sp"
+            android:textIsSelectable="false" />
+    </ScrollView>
+
+    <!-- 扩展按键栏：ESC / TAB / CTRL(粘滞) / 方向键 / HOME / END / 符号（软键盘上方常驻） -->
+    <com.AROAN110.CodingAndroid.terminal.ExtraKeysView
+        android:id="@+id/extraKeys"
+        android:layout_width="match_parent"
+        android:layout_height="42dp"
+        android:background="#20262C" />
+    </LinearLayout>
+
+    <!-- 插件容器（预留）：插件内容后续挂载于此 -->
+    <FrameLayout
+        android:id="@+id/pluginContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- 插件悬浮球：半透明小圆圈，可拖拽；点击提示开发中 -->
+    <View
+        android:id="@+id/pluginBall"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="16dp"
+        android:layout_marginBottom="58dp"
+        android:background="@drawable/plugin_ball_bg" />
+</FrameLayout>

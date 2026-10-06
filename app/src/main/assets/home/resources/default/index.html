@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>CFA Web Layer</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 16px;
+      background: #1B1F23; color: #D8DEE9;
+      font-family: -apple-system, "Segoe UI", monospace;
+      font-size: 14px; line-height: 1.6;
+    }
+    h1 { font-size: 16px; color: #00E5A0; margin: 0 0 4px; }
+    .sub { color: #6b7684; font-size: 12px; margin-bottom: 16px; }
+    .card {
+      background: #20262C; border-radius: 8px; padding: 12px;
+      margin-bottom: 12px;
+    }
+    .label { color: #6b7684; font-size: 12px; }
+    .value { font-family: monospace; word-break: break-all; }
+    button {
+      background: #00E5A0; color: #1B1F23; border: none;
+      border-radius: 6px; padding: 10px 16px; font-size: 14px;
+      font-weight: bold; width: 100%; margin-top: 8px;
+    }
+    button:active { opacity: .7; }
+    #log { font-family: monospace; font-size: 12px; color: #9aa5b1; white-space: pre-wrap; }
+    .ok { color: #00E5A0; }
+    .err { color: #ff6b6b; }
+  </style>
+</head>
+<body>
+  <h1>Coding for Android · Web 层</h1>
+  <div class="sub">缺口一 / 缺口二 骨架验证页</div>
+
+  <div class="card">
+    <div class="label">通信端口（Kotlin 注入）</div>
+    <div class="value" id="port">—</div>
+  </div>
+
+  <div class="card">
+    <div class="label">测试链路</div>
+    <button id="btnPing">发送 ping</button>
+  </div>
+
+  <div class="card">
+    <div class="label">日志</div>
+    <div id="log">等待操作…</div>
+  </div>
+
+  <script>
+    // 端口由 Kotlin 通过 evaluateJavascript 注入（window.__CFA_PORT__）
+    var port = window.__CFA_PORT__ || null;
+    var logEl = document.getElementById('log');
+    var portEl = document.getElementById('port');
+
+    function log(msg, cls) {
+      var t = new Date().toLocaleTimeString();
+      logEl.innerHTML += '\n[' + t + '] ' + (cls ? '<span class="' + cls + '">' + msg + '</span>' : msg);
+    }
+
+    function refreshPort() {
+      port = window.__CFA_PORT__ || null;
+      portEl.textContent = port ? ('127.0.0.1:' + port) : '未注入';
+      return port;
+    }
+
+    function ping() {
+      refreshPort();
+      var native = window.__CFA_NATIVE__;
+      if (!native || typeof native.send !== 'function') {
+        log('原生桥未就绪，等待 Kotlin 注入', 'err');
+        return;
+      }
+      var req = { id: 'req_' + Date.now(), action: 'ping', params: {} };
+      log('→ ' + JSON.stringify(req));
+      try {
+        var t = native.send(JSON.stringify(req));
+        log('← ' + t, 'ok');
+      } catch (e) {
+        log('✗ ' + e, 'err');
+      }
+    }
+
+    document.getElementById('btnPing').addEventListener('click', ping);
+    refreshPort();
+    log('页面已就绪');
+  </script>
+</body>
+</html>

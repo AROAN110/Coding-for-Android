@@ -1,0 +1,5 @@
+{
+  "name": "示例插件",
+  "id": "hello",
+  "entry": "main.js"
+}

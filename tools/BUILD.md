@@ -10,7 +10,7 @@ cd <项目根>
 sh tools/build-apk.sh
 ```
 
-输出: `<项目根>/dist/Coding-for-Android-v1.0-mvp.apk`（可用 `CFA_OUT` 指定其他目录）
+输出: `<项目根>/dist/Coding-for-Android-v1.0.1-mvp.apk`（可用 `CFA_OUT` 指定其他目录）
 
 ## 工具链组成
 

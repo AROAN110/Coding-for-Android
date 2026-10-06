@@ -14,7 +14,7 @@ K="${CFA_KOTLIN:-/opt/kotlinc}"
 T="${CFA_TOOLS:-/opt/cfa-tools}"
 W="${CFA_WORK:-/opt/cfa-build}"
 OUT="${CFA_OUT:-$SRC/dist}"
-APKNAME=Coding-for-Android-v1.0-mvp.apk
+APKNAME=Coding-for-Android-v1.0.1-mvp.apk
 
 cd "$W" || { echo "FATAL: workdir missing"; exit 1; }
 mkdir -p src/app/src/main gen classes dexout "$OUT"

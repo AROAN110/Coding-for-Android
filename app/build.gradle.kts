@@ -13,8 +13,8 @@ android {
         // targetSdk=28：Android 10+ 的 W^X 限制（禁止执行应用私有目录文件）
         // 只作用于 targetSdk≥29；28 为 Termux 同款策略，proot/Alpine 依赖它才能运行。
         targetSdk = 28
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.0.1"
     }
 
     buildTypes {

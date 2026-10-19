@@ -234,7 +234,7 @@ class MainActivity : Activity() {
                     if (!promptForUserMirror("请提供可用的 Alpine 镜像源")) return@Thread
                     mirrors = pendingMirrors
                 }
-                while (true) {
+                while (!ok) {
                     try {
                         AlpineInstaller.install(this, { line ->
                             mainHandler.post { terminalView.appendOutput(line) }

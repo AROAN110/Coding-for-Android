@@ -567,11 +567,31 @@ class TerminalScreenView @JvmOverloads constructor(
             val c = cursor.coerceIn(0, input.length)
             val before = beforeLength.coerceIn(0, c)
             val after = afterLength.coerceIn(0, input.length - c)
-            if (before == 0 && after == 0) return true
-            if (after > 0) input.delete(c, c + after)
-            if (before > 0) input.delete(c - before, c)
-            cursor = c - before
-            composing = ""
+            // composing 预览渲染在光标之前，但不在 input 里：先按码点削掉预览尾部，
+            // 剩余额度再落到已提交文本，避免「删了预览却仍残留已提交内容」或反之
+            var b = before
+            var a = after
+            if (composing.isNotEmpty()) {
+                if (a > 0) {
+                    composing = composing.drop(a)
+                    a = 0
+                }
+                if (b > 0) {
+                    val cpLen = composing.codePointCount(0, composing.length)
+                    val drop = minOf(b, cpLen)
+                    if (drop > 0) {
+                        composing = composing.substring(0, composing.offsetByCodePoints(composing.length, -drop))
+                        b -= drop
+                    }
+                }
+            }
+            if (b == 0 && a == 0) {
+                if (composing.isEmpty()) render()
+                return true
+            }
+            if (a > 0) input.delete(c, c + a)
+            if (b > 0) input.delete(c - b, c)
+            cursor = c - b
             render()
             return true
         }
@@ -587,7 +607,22 @@ class TerminalScreenView @JvmOverloads constructor(
             val end = if (after > 0) s.offsetByCodePoints(c, after) else c
             input.delete(start, end)
             cursor = start
-            composing = ""
+            // 码点语义下同样先削 composing 预览尾部，再落到已提交文本
+            var b = before
+            var a = after
+            if (composing.isNotEmpty()) {
+                if (a > 0) {
+                    composing = composing.drop(a)
+                    a = 0
+                }
+                if (b > 0) {
+                    val cpLen = composing.codePointCount(0, composing.length)
+                    val drop = minOf(b, cpLen)
+                    if (drop > 0) {
+                        composing = composing.substring(0, composing.offsetByCodePoints(composing.length, -drop))
+                    }
+                }
+            }
             render()
             return true
         }

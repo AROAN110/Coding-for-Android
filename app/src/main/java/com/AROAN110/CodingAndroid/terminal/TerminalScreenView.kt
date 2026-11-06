@@ -562,12 +562,35 @@ class TerminalScreenView @JvmOverloads constructor(
         }
 
         override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-            repeat(beforeLength.coerceAtMost(8)) { handleBackspace() }
+            // IME 全选删除 / 长按删词会一次传入远大于 1 的长度：按实际可删范围删干净。
+            // 旧实现固定只删 8 个字符，会与输入法的文本模型不一致（输入行残留内容）
+            val c = cursor.coerceIn(0, input.length)
+            val before = beforeLength.coerceIn(0, c)
+            val after = afterLength.coerceIn(0, input.length - c)
+            if (before == 0 && after == 0) return true
+            if (after > 0) input.delete(c, c + after)
+            if (before > 0) input.delete(c - before, c)
+            cursor = c - before
+            composing = ""
+            render()
             return true
         }
 
-        override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean =
-            deleteSurroundingText(beforeLength, afterLength)
+        override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
+            // 长度单位是「码点」：按 UTF-16 偏移换算，避免把代理对（emoji 等）劈成半个字符
+            val s = input.toString()
+            val c = cursor.coerceIn(0, s.length)
+            val before = beforeLength.coerceIn(0, s.codePointCount(0, c))
+            val after = afterLength.coerceIn(0, s.codePointCount(c, s.length))
+            if (before == 0 && after == 0) return true
+            val start = if (before > 0) s.offsetByCodePoints(c, -before) else c
+            val end = if (after > 0) s.offsetByCodePoints(c, after) else c
+            input.delete(start, end)
+            cursor = start
+            composing = ""
+            render()
+            return true
+        }
 
         override fun sendKeyEvent(event: KeyEvent): Boolean {
             if (event.action == KeyEvent.ACTION_DOWN) {

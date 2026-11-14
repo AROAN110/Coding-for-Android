@@ -29,7 +29,7 @@ class Router {
     private val handlers = HashMap<String, (String, String) -> String>()
 
     companion object {
-        /** 缺口三：终端当前工作目录（由终端侧同步）。Web 请求的 path 必须落在此目录内。 */
+        /** 缺口三：终端当前工作目录（由终端侧同步）。Web 请求的 path 需落在此目录内。 */
         @Volatile
         var currentCwd: String = "/sdcard"
     }
@@ -50,7 +50,7 @@ class Router {
      * 保留参数是为将来 REST 化或健康检查留口。
      */
     fun dispatch(method: String, path: String, body: String): HttpResponse {
-        // 缺口三：CWD 沙箱前置拦截 —— 请求携带的 path 必须落在 currentCwd 内，禁止 ../ 穿越
+        // 缺口三：CWD 沙箱前置拦截 —— 请求携带的 path 需落在 currentCwd 内，禁止 ../ 穿越
         checkSandbox(body)?.let { return it }
 
         if (body.isBlank()) {

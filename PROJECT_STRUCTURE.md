@@ -73,7 +73,7 @@ Coding-for-Android/
 │   └── BUILD.md                  #   构建指南 + 环境重建 + 签名说明
 │
 └── dist/                         # 构建产物（.gitignore 忽略，不入库）
-    └── Coding-for-Android-v1.0.1-mvp.apk
+    └── Coding-for-Android-v1.0.2-mvp.apk
 ```
 
 ---
@@ -85,6 +85,7 @@ Coding-for-Android/
 | **版本号**（versionCode/versionName） | `app/src/main/AndroidManifest.xml` ← **真源！** 同步改 `app/build.gradle.kts` |
 | 应用 ID / SDK 版本 | `app/src/main/AndroidManifest.xml` + `app/build.gradle.kts` |
 | 安装逻辑 / 镜像源 / 测速 | `env/AlpineInstaller.kt` |
+| rootfs 仓库地址 / index.json 格式 | `env/AlpineInstaller.kt`（`DEFAULT_ROOTFS_REPO`）+ README「自建镜像仓库」一节 |
 | 安装弹窗 / 会话管理 / 主流程 | `MainActivity.kt` |
 | 终端行为 / Ctrl+C / PTY | `terminal/TerminalSession.kt` |
 | 扩展键栏按键 | `terminal/ExtraKeysView.kt` |
@@ -103,7 +104,7 @@ CFA_KS_PASS=<你的口令> \
 sh /sdcard/Download/Operit/project/Coding-for-Android/tools/build-apk.sh
 ```
 
-- 产物：`dist/Coding-for-Android-v1.0.1-mvp.apk`
+- 产物：`dist/Coding-for-Android-v1.0.2-mvp.apk`
 - 工具链位置：`/opt/kotlinc`、`/opt/cfa-tools`（重建方法见 `tools/BUILD.md`）
 - 签名：`CFA_KEYSTORE` / `CFA_KS_ALIAS` / `CFA_KS_PASS` 环境变量注入（**不写进脚本**）
 
@@ -115,15 +116,15 @@ sh /sdcard/Download/Operit/project/Coding-for-Android/tools/build-apk.sh
 
 ---
 
-## 四、关键坑位（血泪备忘）
+## 四、常见问题与注意事项
 
 1. **版本号真源是 `AndroidManifest.xml`** —— 手动工具链（aapt2 link）**不读 gradle**。只改 `build.gradle.kts` 无效，必须改 Manifest。验证：`aapt2 dump badging <apk> | grep package:`。
-2. **签名口令绝不硬编码** —— 脚本里只有占位值 `changeit`；真实口令走环境变量 `CFA_KS_PASS`。
+2. **签名口令不硬编码** —— 脚本里只有占位值 `changeit`；真实口令走环境变量 `CFA_KS_PASS`。
 3. **keystore / APK 不入库** —— `.gitignore` 已挡 `*.keystore`、`*.jks`、`*.apk`、`dist/`。
 4. **kotlinc 需补 `annotations-13.0.jar`** —— 否则 IR lowering 阶段崩（`NoClassDefFoundError: NotNull`）。
 5. **零第三方依赖硬约束** —— 无 kotlinx-coroutines，并发用 `Executors` + `CountDownLatch` + `Thread`。
 6. **targetSdk 刻意压 28** —— 绕 Android 10+ W^X 限制，proot 才能执行私有目录文件。
-7. **改命令行参数数组易丢参数** —— 曾误删 `-b /sdcard` 的 `-b` 导致容器秒退，改后务必实装验证。
+7. **改命令行参数数组易丢参数** —— 曾误删 `-b /sdcard` 的 `-b` 导致容器秒退，改后需实装验证。
 8. **`rm -rf` 字面量被 Operit shell 拦截** —— 用 `rm -fr` 换序，或逐条 `rm -f 具体文件`。
 
 ---
@@ -140,7 +141,7 @@ sh /sdcard/Download/Operit/project/Coding-for-Android/tools/build-apk.sh
 
 ## 六、当前状态
 
-- 版本：**v1.0.1**（versionCode 2）
+- 版本：**v1.0.2**（versionCode 3）
 - 分支：`main`，远程 `https://github.com/AROAN110/Coding-for-Android.git`
 - 签名指纹：`23d83b7185f7a0f36864be20c6d069ea7a773de1489d64688ae6916d9cfe177a`
 - APK 体积：约 780KB（800,162 字节）

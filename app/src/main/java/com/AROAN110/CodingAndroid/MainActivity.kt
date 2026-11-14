@@ -18,6 +18,7 @@ import android.webkit.WebViewClient
 import android.widget.TextView
 import android.widget.Toast
 import android.widget.EditText
+import android.widget.LinearLayout
 import com.AROAN110.CodingAndroid.bridge.LocalHttpServer
 import com.AROAN110.CodingAndroid.bridge.Router
 import com.AROAN110.CodingAndroid.command.PmcCommandHandler
@@ -81,6 +82,9 @@ class MainActivity : Activity() {
     /** 当前 Alpine 会话启动时刻（用于识别「秒退」）。 */
     private var alpineSessionStartedAt = 0L
 
+    /** 操作提示是否已输出过（只在首次进入容器时打印，会话重启不重复）。 */
+    private var hintPrinted = false
+
     private val buffers = HashMap<TerminalSession, StringBuilder>()
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -105,9 +109,13 @@ class MainActivity : Activity() {
     @Volatile
     private var mirrorLatch: CountDownLatch? = null
 
-    /** 用户最近一次提交的临时源（仅本次引导使用，绝不落任何配置）。 */
+    /** 用户最近一次提交的临时源（仅本次引导使用，不写入任何配置）。 */
     @Volatile
     private var pendingMirrors: List<String> = emptyList()
+
+    /** 用户最近一次提交的代理地址（host:port，空串表示直连）。 */
+    @Volatile
+    private var pendingProxy: String = ""
 
     private val currentSession: TerminalSession?
         get() = suSession ?: when (baseEnv) {
@@ -147,10 +155,10 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // ★ 强制释放后台安装线程在 promptForUserMirror() 中的等待，避免线程死锁
+        // 强制释放后台安装线程在 promptForUserMirror() 中的等待，避免线程死锁
         mirrorLatch?.countDown()
         mirrorLatch = null
-        // ★ 强制打断仍在 AlpineInstaller.install() 阶段的后台线程，避免向已销毁视图投递输出
+        // 强制打断仍在 AlpineInstaller.install() 阶段的后台线程，避免向已销毁视图投递输出
         AlpineInstaller.abortInstallation()
         httpServer?.stop()
         suSession?.destroy()
@@ -160,7 +168,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
-        // WebView 状态保持：后台暂停 JS，但绝不销毁
+        // WebView 状态保持：后台暂停 JS，但不销毁
         webView.onPause()
     }
 
@@ -192,16 +200,13 @@ class MainActivity : Activity() {
     private fun boot() {
         val ver = appVersion()
         updateBanner(Environment.ALPINE_CONTAINER)
-        terminalView.appendOutput(
-            "[CFA] Coding for Android v$ver — 最小底座\n" +
-                "[CFA] 默认环境: Alpine 容器 | 输入 su 申请 Root | pmc help 查看指令\n\n",
-        )
+        terminalView.appendOutput("[CFA] Coding for Android v$ver — 最小底座\n\n")
         if (AlpineInstaller.isInstalled(this)) {
             startAlpine()
             return
         }
         // 容器未安装：仅首次进入安装闭环；其余情况一律静默终止，
-        // 错误处理全部由 promptForUserMirror() 接管，绝不打印任何「未安装」提示。
+        // 错误处理全部由 promptForUserMirror() 接管，不打印任何「未安装」提示。
         if (bootInstallStarted) return
         bootInstallStarted = true
         startInstall()
@@ -216,7 +221,7 @@ class MainActivity : Activity() {
     /**
      * 安装闭环（唯一入口，非阻塞主线程）：
      *  - 专用后台线程内循环「测速安装 → 失败则弹窗取源 → 立刻用该源重试」，
-     *    直到安装成功或用户取消；绝不退回 boot()，绝不刷屏；
+     *    直到安装成功或用户取消；不退回 boot()，不刷屏；
      *  - temporaryMirrors 非空时作为首轮源；forcePrompt=true 时先取源再开跑；
      *  - 测速/安装失败一律由 promptForUserMirror() 接管，Ctrl+C 可随时打断。
      */
@@ -227,37 +232,44 @@ class MainActivity : Activity() {
         terminalView.appendOutput("[CFA] 开始准备 Alpine 容器（需要联网，Ctrl+C 可打断）…\n")
         Thread({
             var mirrors = temporaryMirrors
+            var proxy = pendingProxy
             var ok = false
             try {
                 if (forcePrompt && mirrors.isEmpty()) {
                     // 主动入口（pmc install）：先取源；用户取消则直接退出闭环
                     if (!promptForUserMirror("请提供可用的 Alpine 镜像源")) return@Thread
                     mirrors = pendingMirrors
+                    proxy = pendingProxy
                 }
                 while (!ok) {
                     try {
                         AlpineInstaller.install(this, { line ->
-                            mainHandler.post { terminalView.appendOutput(line) }
-                        }, mirrors)
+                            mainHandler.post { appendInstallLine(line) }
+                        }, mirrors, proxy.ifEmpty { null })
                         ok = true
                     } catch (e: InstallationInterruptedException) {
-                        // 用户打断：清理残留后强制取源再重试，绝不直接退出闭环
+                        // 用户打断：清理残留后强制取源再重试，不直接退出闭环
                         AlpineInstaller.cleanupAfterAbort(this)
                         if (!promptForUserMirror("用户打断了安装，请提供备用镜像源")) break
                         mirrors = pendingMirrors
+                        proxy = pendingProxy
                     } catch (e: Exception) {
                         AlpineInstaller.cleanupAfterAbort(this)
                         val reason = e.message ?: e.javaClass.simpleName
                         mainHandler.post { terminalView.appendOutput("[CFA] 安装失败：$reason\n") }
-                        // 失败必须重新取源，绝不跳出安装流程回到 boot()
+                        // 失败后重新取源，不跳出安装流程回到 boot()
                         if (!promptForUserMirror(reason)) break
                         mirrors = pendingMirrors
+                        proxy = pendingProxy
                     }
                 }
                 ok = AlpineInstaller.isInstalled(this)
             } finally {
                 installFlowRunning = false
                 installing = false
+                // 临时源与代理只服务于本次引导：流程结束即清，避免下次安装沿用旧值
+                pendingMirrors = emptyList()
+                pendingProxy = ""
                 mainHandler.post {
                     if (ok) {
                         terminalView.appendOutput("[CFA] 容器就绪，正在启动…\n\n")
@@ -270,8 +282,17 @@ class MainActivity : Activity() {
         }, "cfa-installer").start()
     }
 
+    /** 安装输出分流：进度行原地刷新，其余正常追加。 */
+    private fun appendInstallLine(line: String) {
+        if (line.startsWith(PROGRESS_PREFIX)) {
+            terminalView.updateLastLine(line, PROGRESS_PREFIX)
+        } else {
+            terminalView.appendOutput(line)
+        }
+    }
+
     /**
-     * 需求三：安装阶段 Ctrl+C —— 立即打断。
+     * 安装阶段 Ctrl+C —— 立即打断。
      * 返回 true 表示已消费该按键；未处于安装流程时返回 false（交回常规 Ctrl+C 处理）。
      */
     private fun tryAbortInstall(): Boolean {
@@ -281,6 +302,7 @@ class MainActivity : Activity() {
             mirrorDialog = null
             awaitingMirror = false
             pendingMirrors = emptyList()
+            pendingProxy = ""
             mirrorLatch?.countDown()
             return true
         }
@@ -291,9 +313,9 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 需求四：询问自定义镜像源（阻塞调用线程，**仅限安装后台线程调用**）。
+     * 询问自定义镜像源（阻塞调用线程，**仅限安装后台线程调用**）。
      * 用户提交则 pendingMirrors 生效并返回 true；取消/空输入返回 false（退出闭环）。
-     * 红线：临时源绝不写入 SharedPreferences、绝不修改 pmc 仓库配置，仅用于本次引导安装。
+     * 临时源仅用于本次引导安装，不写入 SharedPreferences，也不修改 pmc 仓库配置。
      */
     private fun promptForUserMirror(reason: String): Boolean {
         if (isFinishing || isDestroyed) return false
@@ -306,25 +328,46 @@ class MainActivity : Activity() {
                 return@post
             }
             awaitingMirror = true
-            val input = EditText(this).apply {
-                hint = "https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.24"
+            val urlInput = EditText(this).apply {
+                hint = "https://github.com/AROAN110/CFA-resources"
                 setSingleLine(false)
+                minLines = 2
+            }
+            val proxyInput = EditText(this).apply {
+                hint = "127.0.0.1:7890（选填，留空则直连）"
+                setSingleLine(true)
+            }
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                val pad = (16 * resources.displayMetrics.density).toInt()
+                setPadding(pad, pad / 2, pad, 0)
+                addView(TextView(this@MainActivity).apply {
+                    text = "镜像地址（必填，多个用英文逗号分隔）"
+                })
+                addView(urlInput)
+                addView(TextView(this@MainActivity).apply {
+                    text = "代理端口（选填）"
+                    setPadding(0, pad / 2, 0, 0)
+                })
+                addView(proxyInput)
             }
             mirrorDialog = AlertDialog.Builder(this)
                 .setTitle("安装失败：请提供镜像源")
                 .setMessage(
                     "$reason\n\n" +
-                        "每行一个 Alpine 镜像 base URL（含 /alpine/vX.Y，不含 /main）。\n" +
+                        "地址需为仓库根路径（内含 index.json），多个用英文逗号分隔。\n" +
                         "本次仅用于引导安装，不会写入任何配置。",
                 )
-                .setView(input)
+                .setView(box)
                 .setCancelable(false)
                 .setPositiveButton("重试") { _, _ ->
                     awaitingMirror = false
                     mirrorDialog = null
-                    pendingMirrors = input.text.toString().lines()
+                    pendingMirrors = urlInput.text.toString()
+                        .split(',', '，')
                         .map { it.trim() }
                         .filter { it.isNotEmpty() }
+                    pendingProxy = proxyInput.text.toString().trim()
                     submitted[0] = pendingMirrors.isNotEmpty()
                     latch.countDown()
                 }
@@ -332,6 +375,7 @@ class MainActivity : Activity() {
                     awaitingMirror = false
                     mirrorDialog = null
                     pendingMirrors = emptyList()
+                    pendingProxy = ""
                     submitted[0] = false
                     latch.countDown()
                 }
@@ -339,7 +383,7 @@ class MainActivity : Activity() {
             mirrorDialog?.show()
         }
         try {
-            // ★ 强制最多等待 10 分钟，防止 Activity 销毁导致线程永久死锁
+            // 强制最多等待 10 分钟，防止 Activity 销毁导致线程永久死锁
             if (!latch.await(10, java.util.concurrent.TimeUnit.MINUTES)) {
                 // 超时边缘竞态：用户可能刚好在此刻点了「重试」→ 以已提交的输入为准
                 if (!submitted[0]) {
@@ -368,7 +412,7 @@ class MainActivity : Activity() {
             return
         }
         if (!AlpineInstaller.isInstalled(this)) {
-            // 容器未就绪：交给安装闭环接管（绝不在此阻塞主线程弹窗）
+            // 容器未就绪：交给安装闭环接管（不在此阻塞主线程弹窗）
             startInstall()
             return
         }
@@ -428,16 +472,26 @@ class MainActivity : Activity() {
         s.start()
     }
 
-    /** 输出容器引导文本（/root/welcome.txt，用户可自行修改）。 */
+    /** 输出容器引导文本（/root/welcome.txt，用户可自行修改），首次附带操作提示。 */
     private fun printWelcome(rootfs: File) {
         val f = File(rootfs, "root/welcome.txt")
-        if (!f.isFile) return
-        val text = try {
-            f.readText().trimEnd()
-        } catch (_: Exception) {
-            return
+        val text = if (f.isFile) {
+            try {
+                f.readText().trimEnd()
+            } catch (_: Exception) {
+                ""
+            }
+        } else {
+            ""
         }
         if (text.isNotEmpty()) terminalView.appendOutput(text + "\n\n")
+        // 操作提示排在欢迎语之后：先读欢迎，再看能做什么；仅首次启动输出，会话重启不重复
+        if (!hintPrinted) {
+            hintPrinted = true
+            terminalView.appendOutput(
+                "[CFA] 默认环境: Alpine 容器 | 输入 su 申请 Root | pmc help 查看指令\n\n",
+            )
+        }
     }
 
     private fun startHost() {
@@ -1014,26 +1068,31 @@ class MainActivity : Activity() {
 
     private fun showStatus() {
         val sb = StringBuilder()
-        sb.append("[CFA] 运行状态\n")
-        sb.append("  当前环境: ${baseEnv.label}").append(if (suSession != null) "（Root 会话中）" else "").append('\n')
-        sb.append("  会话: Alpine=").append(aliveText(alpineSession))
-        sb.append(" | 主机=").append(aliveText(hostSession))
-        sb.append(" | Root=").append(aliveText(suSession)).append('\n')
-        sb.append("  容器: ").append(if (AlpineInstaller.isInstalled(this)) "已就绪" else "未安装").append('\n')
-        sb.append("  安装流程: ").append(if (installing) "进行中" else "空闲").append('\n')
+        sb.append("pmc: status\n")
+        sb.append("  Environment: ").append(baseEnv.key)
+        sb.append(if (suSession != null) " (in root session)" else "").append('\n')
+        sb.append("  Sessions: alpine=").append(aliveText(alpineSession))
+        sb.append(" | host=").append(aliveText(hostSession))
+        sb.append(" | root=").append(aliveText(suSession)).append('\n')
+        sb.append("  Container: ")
+        sb.append(if (AlpineInstaller.isInstalled(this)) "ready" else "not installed").append('\n')
+        sb.append("  Install flow: ").append(if (installing) "running" else "idle").append('\n')
         terminalView.appendOutput(sb.toString())
     }
 
     private fun aliveText(s: TerminalSession?): String = when {
-        s == null -> "未启动"
-        s.isRunning -> "运行中(pid=${s.pid})"
-        else -> "已结束"
+        s == null -> "not started"
+        s.isRunning -> "running(pid=${s.pid})"
+        else -> "ended"
     }
 
     private companion object {
         const val MAX_BUFFER_CHARS = 60_000
         const val REQ_STORAGE = 1001
         const val TAG_RES = "CFA_RES"
+
+        /** 下载进度行的起始标记，用于原地刷新而非追加。 */
+        const val PROGRESS_PREFIX = "  进度:"
 
         /** Alpine 会话存活时长低于此值即判定为「秒退」（用于 PTY 降级）。 */
         const val QUICK_EXIT_MS = 3_000L

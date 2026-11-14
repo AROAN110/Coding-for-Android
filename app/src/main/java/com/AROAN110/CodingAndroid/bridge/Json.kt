@@ -52,6 +52,60 @@ object Json {
         return null
     }
 
+    /**
+     * 取数组字段第一项对象中的字符串值。
+     * 例如 {"rootfs":[{"name":"a.tar.gz"}]} 取 ("rootfs","name") → a.tar.gz
+     * 数组为空或字段缺失返回 null。
+     */
+    fun extractFirstArrayObjectString(json: String, arrayKey: String, field: String): String? {
+        val obj = firstArrayObject(json, arrayKey) ?: return null
+        return extractString(obj, field)
+    }
+
+    /** 取数组字段第一项对象中的长整型值（字段缺失或非数字返回 null）。 */
+    fun extractFirstArrayObjectLong(json: String, arrayKey: String, field: String): Long? {
+        val obj = firstArrayObject(json, arrayKey) ?: return null
+        val pattern = Regex("\"${Regex.escape(field)}\"\\s*:\\s*(\\d+)")
+        return pattern.find(obj)?.groupValues?.get(1)?.toLongOrNull()
+    }
+
+    /** 截取数组字段的第一个对象文本；结构不符返回 null。 */
+    private fun firstArrayObject(json: String, arrayKey: String): String? {
+        val keyIdx = json.indexOf("\"$arrayKey\"")
+        if (keyIdx < 0) return null
+        val colon = json.indexOf(':', keyIdx)
+        if (colon < 0) return null
+        var i = colon + 1
+        while (i < json.length && json[i].isWhitespace()) i++
+        if (i >= json.length || json[i] != '[') return null
+        i++
+        while (i < json.length && json[i].isWhitespace()) i++
+        if (i >= json.length || json[i] != '{') return null
+        var depth = 0
+        val start = i
+        var inStr = false
+        var escaped = false
+        while (i < json.length) {
+            val c = json[i]
+            if (inStr) {
+                if (escaped) escaped = false
+                else if (c == '\\') escaped = true
+                else if (c == '"') inStr = false
+            } else {
+                when (c) {
+                    '"' -> inStr = true
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return json.substring(start, i + 1)
+                    }
+                }
+            }
+            i++
+        }
+        return null
+    }
+
     private fun unescape(s: String): String {
         if (!s.contains('\\')) return s
         val sb = StringBuilder(s.length)

@@ -10,18 +10,22 @@ package com.AROAN110.CodingAndroid.env
  * UI 与终端提示统一从这里取文案，避免散落硬编码。
  */
 enum class Environment(
+    val key: String,
     val label: String,
     val warning: String,
 ) {
     ALPINE_CONTAINER(
+        key = "alpine",
         label = "Alpine容器",
         warning = "apk 包管理在此环境生效；输入 su 申请 Root",
     ),
     HOST_SHELL(
+        key = "host",
         label = "Android主机",
         warning = "宿主 shell；输入 su 申请 Root，输入 pmc alpine 返回容器",
     ),
     HOST_SU(
+        key = "root",
         label = "Android su主机",
         warning = "仅用于文件迁移；apk 命令在此无效，输入 exit 切回容器",
     ),

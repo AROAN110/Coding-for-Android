@@ -2,9 +2,12 @@ package com.AROAN110.CodingAndroid.env
 
 import android.content.Context
 import android.os.Process as AndroidProcess
+import com.AROAN110.CodingAndroid.bridge.Json
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.URL
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -13,20 +16,12 @@ import java.util.concurrent.TimeUnit
 /**
  * Alpine 容器安装器：
  *  1. 释放 APK assets 中的 proot 四件套 → filesDir/proot/（并设置执行位）；
- *  2. 下载 Alpine minirootfs（多源回退）→ 用系统 toybox tar 解包到 filesDir/alpine/；
+ *  2. 下载 Alpine minirootfs（仓库 index.json 驱动）→ 用系统 toybox tar 解包到 filesDir/alpine/；
  *  3. 写入 /etc/resolv.conf 与 /etc/apk/repositories（清华镜像）。
  *
  * 全部步骤可重入：中途失败后重新调用会跳过已完成部分。
  */
 object AlpineInstaller {
-
-    /**
-     * rootfs 下载源（按序尝试）：仅使用公共镜像（不依赖个人仓库）。
-     */
-    private val ROOTFS_URLS = listOf(
-        "https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.2-aarch64.tar.gz",
-        "https://mirrors.aliyun.com/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.2-aarch64.tar.gz",
-    )
 
     /** 基础包安装源（按序强制迭代；每源自动补 /main + /community 两行）。 */
     private val APK_SOURCES = listOf(
@@ -38,12 +33,22 @@ object AlpineInstaller {
         "Clarkson" to "http://mirror.clarkson.edu/alpine/v3.24",
     )
 
-    private const val ROOTFS_MIN_BYTES = 3_000_000L
+    /** 兜底下限：只用于挡住服务端返回的错误页（HTML 通常几百字节），不限制真实 rootfs 大小。 */
+    private const val ROOTFS_MIN_BYTES = 100L * 1024L
+
+    /** index.json 提供 size 时的容差比例（服务端 gzip 重压缩可能导致轻微偏差）。 */
+    private const val SIZE_TOLERANCE = 0.2
+
+    /** 默认 rootfs 下载源（维护者仓库，内含 index.json 与 rootfs 文件）。 */
+    private const val DEFAULT_ROOTFS_REPO = "https://github.com/AROAN110/CFA-resources"
+
+    /** 仓库索引文件名。 */
+    private const val INDEX_FILE = "index.json"
 
     /** 冒烟测试成功输出的标记文本。 */
     private const val SMOKE_OK = "CFA_SMOKE_OK"
 
-    // ---- 测速参数（需求一）----
+    // ---- 镜像测速参数 ----
     private const val PROBE_TIMEOUT_MS = 3_000
     private const val PROBE_TOTAL_WAIT_MS = 6_000L
     private const val MAX_PROBE_THREADS = 6
@@ -52,7 +57,10 @@ object AlpineInstaller {
     /** SIGKILL 信号编号（强杀进程树用）。 */
     private const val SIGNAL_SIGKILL = 9
 
-    // ---- 打断控制（需求三）----
+    /** 下载进度上报步长（字节），用于节流高频回调。 */
+    private const val PROGRESS_STEP_BYTES = 256L * 1024L
+
+    // ---- 打断控制 ----
 
     /** 当前正在执行的子进程（安装阶段可被强制打断）。 */
     @Volatile
@@ -64,8 +72,8 @@ object AlpineInstaller {
 
     /**
      * 立即强制终止当前安装（Ctrl+C / 用户取消）。
-     * 关键：proot 的子进程（busybox / apk）不会随父进程死亡而退出，
-     * 必须整树 SIGKILL，否则残留进程持有 apk 数据库锁、后续安装卡死。
+     * proot 的子进程（busybox / apk）不会随父进程死亡而退出，
+     * 需整树 SIGKILL，否则残留进程持有 apk 数据库锁、后续安装卡死。
      */
     fun abortInstallation() {
         aborted = true
@@ -166,8 +174,9 @@ object AlpineInstaller {
     }
 
     /**
-     * 清理上一次中断留下的残留（tmp / apk 锁 / 半包），恢复默认源，
+     * 清理上一次中断留下的残留（tmp / apk 锁 / 半包 / 半解包容器），
      * 并复位打断标志，防止后续安装（或 pmc 降级安装）被旧状态污染。
+     * 只清「未完成」的产物：已装好的容器（含 bin/busybox）不动。
      */
     fun cleanupAfterAbort(context: Context) {
         val files = context.filesDir
@@ -184,19 +193,20 @@ object AlpineInstaller {
             File(files, "alpine-rootfs.tar.gz").delete()
         } catch (_: Exception) {
         }
-        // ★ 建议一：不再强制写回官方 CDN。
-        //   原逻辑会在每次清理/重装时把用户手动改过的源覆盖成连不上的官方源，已注释移除。
-        // try {
-        //     val repos = File(files, "alpine/etc/apk/repositories")
-        //     if (repos.isFile) {
-        //         repos.writeText(buildRepositoriesContent(APK_SOURCES.first().second))
-        //     }
-        // } catch (_: Exception) {
-        // }
+        // 半解包容器：目录存在但没有可用 busybox，说明解包没走完，整棵清掉重来
+        try {
+            val rootfsDir = File(files, "alpine")
+            if (rootfsDir.isDirectory && !File(rootfsDir, "bin/busybox").isFile) {
+                deleteQuietly(rootfsDir)
+            }
+        } catch (_: Exception) {
+        }
+        // 不在此覆盖 /etc/apk/repositories：用户手动配置的源应保留，
+        // 否则每次清理/重装都会被强制改回内置源。
         aborted = false
     }
 
-    // ---- 并发测速选源（需求一）----
+    // ---- 并发测速选源 ----
 
     /**
      * 并发探测各镜像的 APKINDEX.tar.gz，返回耗时最低的镜像 base URL；全部失败返回 null。
@@ -267,10 +277,21 @@ object AlpineInstaller {
     }
 
     /** 执行安装（阻塞，需在后台线程调用）。onProgress 用于输出进度文本。
-     *  temporaryMirrors 非空时优先用作基础包源（仅本次引导使用，不落任何配置）。 */
-    fun install(context: Context, onProgress: (String) -> Unit, temporaryMirrors: List<String> = emptyList()) {
+     *  temporaryMirrors 非空时作为 rootfs 下载源（仅本次引导使用，不落任何配置）；
+     *  proxy 为 host:port 形式的 HTTP 代理，空则直连。 */
+    fun install(
+        context: Context,
+        onProgress: (String) -> Unit,
+        temporaryMirrors: List<String> = emptyList(),
+        proxy: String? = null,
+    ) {
         val files = context.filesDir
-        aborted = false
+        // 安装启动瞬间用户可能已按 Ctrl+C：此时 aborted 已置位，需立即退出，
+        // 不能无条件清零，否则这次打断会被吞掉，用户得按第二次。
+        if (aborted) {
+            aborted = false
+            throw InstallationInterruptedException()
+        }
 
         checkAbort()
         onProgress("[安装] 释放 proot 运行件…\n")
@@ -280,13 +301,14 @@ object AlpineInstaller {
         if (!File(rootfsDir, "bin/busybox").isFile) {
             checkAbort()
             onProgress("[安装] 下载 Alpine minirootfs（约 4MB）…\n")
-            val tarGz = downloadRootfs(context, onProgress, temporaryMirrors)
+            val tarGz = downloadRootfs(context, onProgress, temporaryMirrors, proxy)
             checkAbort()
             onProgress("[安装] 解包 Alpine 容器（515 个条目）…\n")
-            extractRootfs(tarGz, rootfsDir)
             try {
-                tarGz.delete()
-            } catch (_: Exception) {
+                extractRootfs(tarGz, rootfsDir)
+            } finally {
+                // 成功已解出内容，失败留着也无效：一律删掉，下次重试重新下载
+                deleteQuietly(tarGz)
             }
         } else {
             onProgress("[安装] Alpine 容器已存在，跳过下载\n")
@@ -301,8 +323,8 @@ object AlpineInstaller {
         smokeTest(context, rootfsDir, File(files, "proot"))
         checkAbort()
         onProgress("[安装] 安装基础包（bash / coreutils / findutils / grep / sed / gawk / util-linux，需联网）…\n")
-        installBasePackages(context, rootfsDir, onProgress, temporaryMirrors)
-        // 安装成功：恢复默认主源，清除本次临时源写入的痕迹（需求四红线）
+        installBasePackages(context, rootfsDir, onProgress)
+        // 安装成功：恢复默认主源，清除本次临时源写入的痕迹
         restoreDefaultRepositories(rootfsDir)
         checkAbort()
         onProgress("[安装] 写入用户环境（.bashrc / welcome.txt / 默认 shell）…\n")
@@ -360,27 +382,34 @@ object AlpineInstaller {
         context: Context,
         onProgress: (String) -> Unit,
         temporaryMirrors: List<String> = emptyList(),
+        proxy: String? = null,
     ): File {
         val dest = File(context.filesDir, "alpine-rootfs.tar.gz")
-        // 候选源：临时源（用户输入）优先，按其 base 拼接标准 rootfs 路径；为空才用内置源
-        val urls: List<String> = if (temporaryMirrors.isNotEmpty()) {
-            temporaryMirrors.map {
-                "${it.trimEnd('/')}/releases/aarch64/alpine-minirootfs-3.24.2-aarch64.tar.gz"
-            }
+        // 候选源：用户填写的优先，否则用维护者仓库
+        val bases: List<String> = if (temporaryMirrors.isNotEmpty()) {
+            temporaryMirrors
         } else {
-            ROOTFS_URLS
+            listOf(DEFAULT_ROOTFS_REPO)
         }
         var lastErr = "未知错误"
-        for (url in urls) {
+        for (base in bases) {
             try {
-                onProgress("  源: $url\n")
-                download(url, dest)
+                onProgress("  源: $base\n")
+                val entry = resolveRootfs(base, proxy)
+                onProgress("  文件: ${entry.name}\n")
+                download(joinUrl(base, entry.name), dest, proxy) { done, total ->
+                    onProgress(progressLine(done, total))
+                }
                 val len = dest.length()
-                if (len < ROOTFS_MIN_BYTES) throw IOException("文件过小（$len 字节）")
+                if (!sizeAcceptable(len, entry.size)) {
+                    // 大小与索引不符或明显不是 rootfs（如错误页）：删掉，避免下次误用
+                    deleteQuietly(dest)
+                    throw IOException("文件大小异常（$len 字节，索引声明 ${entry.size ?: "未知"}）")
+                }
                 onProgress("  下载完成（${len / 1024 / 1024} MiB）\n")
                 return dest
             } catch (e: InstallationInterruptedException) {
-                // 打断必须穿透：不能被通用 catch 吞掉后继续换源
+                // 打断异常需原样向上抛出，不能被通用 catch 吞掉后继续换源
                 throw e
             } catch (e: Exception) {
                 lastErr = e.message ?: e.javaClass.simpleName
@@ -390,18 +419,112 @@ object AlpineInstaller {
         throw IOException("所有下载源均失败：$lastErr")
     }
 
-    private fun download(urlStr: String, dest: File) {
-        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 8_000
-            // 分片读 + 超时循环：既能读到完整文件，又能在被打断时及时退出
-            readTimeout = 5_000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", USER_AGENT)
+    /** 索引中的 rootfs 条目：文件名 + 声明大小（可能缺失）。 */
+    private data class RootfsEntry(val name: String, val size: Long?)
+
+    /**
+     * 判断下载结果大小是否可信：
+     *  - 索引声明了 size → 按 ±容差比对，允许魔改或重压缩造成的轻微偏差；
+     *  - 索引未声明 size → 只要求不小于兜底下限（挡错误页，不限制真实大小）。
+     */
+    private fun sizeAcceptable(actual: Long, expected: Long?): Boolean {
+        if (expected != null && expected > 0) {
+            val lo = (expected * (1.0 - SIZE_TOLERANCE)).toLong().coerceAtLeast(0)
+            val hi = (expected * (1.0 + SIZE_TOLERANCE)).toLong()
+            return actual in lo..hi
         }
+        return actual >= ROOTFS_MIN_BYTES
+    }
+
+    /** 拼接仓库地址与文件名。 */
+    private fun joinUrl(base: String, name: String): String =
+        base.trimEnd('/') + "/" + name.trimStart('/')
+
+    /**
+     * 从仓库 index.json 读取 rootfs 条目（文件名 + 声明大小）。
+     * 取 rootfs 数组第一项（约定为最新版）；索引不可用时抛出异常，交由上层换源。
+     */
+    private fun resolveRootfs(base: String, proxy: String?): RootfsEntry {
+        val indexUrl = joinUrl(base, INDEX_FILE)
+        val text = httpGetText(indexUrl, proxy)
+        val name = Json.extractFirstArrayObjectString(text, "rootfs", "name")
+            ?: throw IOException("index.json 中缺少 rootfs.name")
+        if (name.isBlank()) throw IOException("index.json 中 rootfs.name 为空")
+        val size = Json.extractFirstArrayObjectLong(text, "rootfs", "size")
+        return RootfsEntry(name, size)
+    }
+
+    /** 拉取文本（index.json 等）。 */
+    private fun httpGetText(url: String, proxy: String?): String {
+        val conn = openConnection(url, proxy, 10_000, 10_000)
         try {
             val code = conn.responseCode
             if (code !in 200..299) throw IOException("HTTP $code")
+            return conn.inputStream.bufferedReader(Charsets.UTF_8).readText()
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /** 构造带可选代理的 HTTP 连接。 */
+    private fun openConnection(
+        url: String,
+        proxy: String?,
+        connectMs: Int,
+        readMs: Int,
+    ): HttpURLConnection {
+        // 代理只能在建立连接时指定（HttpURLConnection 没有可写的 proxy 属性）
+        val p = parseProxy(proxy)
+        val raw = if (p != null) URL(url).openConnection(p) else URL(url).openConnection()
+        val conn = raw as HttpURLConnection
+        conn.connectTimeout = connectMs
+        conn.readTimeout = readMs
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty("User-Agent", USER_AGENT)
+        return conn
+    }
+
+    /** 解析 "host:port" 形式的代理地址；空或非法返回 null（即直连）。 */
+    private fun parseProxy(proxy: String?): Proxy? {
+        val raw = proxy?.trim().orEmpty()
+        if (raw.isEmpty()) return null
+        val hostPort = raw.removePrefix("http://").removePrefix("HTTP://").trimEnd('/')
+        val idx = hostPort.lastIndexOf(':')
+        if (idx <= 0 || idx == hostPort.length - 1) return null
+        val host = hostPort.substring(0, idx)
+        val port = hostPort.substring(idx + 1).toIntOrNull() ?: return null
+        if (port !in 1..65535) return null
+        return Proxy(Proxy.Type.HTTP, InetSocketAddress(host, port))
+    }
+
+    /** 生成单行进度文本（由 View 层原地覆盖上一行）。 */
+    private fun progressLine(done: Long, total: Long): String {
+        if (total <= 0) {
+            return "  进度: ${fmtMiB(done)} MiB\n"
+        }
+        val pct = (done * 100 / total).toInt().coerceIn(0, 100)
+        val filled = pct / 5
+        val bar = "#".repeat(filled) + "-".repeat(20 - filled)
+        return "  进度: [$bar] $pct%  ${fmtMiB(done)}/${fmtMiB(total)} MiB\n"
+    }
+
+    private fun fmtMiB(bytes: Long): String = "%.1f".format(bytes / 1024.0 / 1024.0)
+
+    private fun download(
+        urlStr: String,
+        dest: File,
+        proxy: String? = null,
+        onProgress: ((Long, Long) -> Unit)? = null,
+    ) {
+        var completed = false
+        val conn = openConnection(urlStr, proxy, 8_000, 5_000)
+        try {
+            val code = conn.responseCode
+            if (code !in 200..299) throw IOException("HTTP $code")
+            val total = conn.contentLengthLong
             val buf = ByteArray(65_536)
+            var done = 0L
+            var lastReport = 0L
             conn.inputStream.use { inp ->
                 dest.outputStream().use { os ->
                     while (true) {
@@ -413,48 +536,79 @@ object AlpineInstaller {
                         }
                         if (n < 0) break
                         os.write(buf, 0, n)
+                        done += n
+                        // 节流：每 256KB 或最后一块才上报，避免高频重绘拖慢主线程
+                        if (done - lastReport >= PROGRESS_STEP_BYTES) {
+                            lastReport = done
+                            onProgress?.invoke(done, total)
+                        }
                     }
+                    onProgress?.invoke(done, total)
                 }
             }
+            completed = true
         } finally {
             conn.disconnect()
+            // 未完成（打断 / 网络中断 / 校验失败）时清掉半截文件，避免占空间与误判
+            if (!completed) deleteQuietly(dest)
+        }
+    }
+
+    /** 静默删除文件或目录树，失败不抛异常。 */
+    private fun deleteQuietly(target: File) {
+        try {
+            if (target.isDirectory) {
+                target.listFiles()?.forEach { deleteQuietly(it) }
+            }
+            target.delete()
+        } catch (_: Exception) {
         }
     }
 
     // ---- rootfs 解包（系统 toybox tar，已验证支持 gzip + symlink）----
 
     private fun extractRootfs(tarGz: File, rootfsDir: File) {
+        // 与 install() 用同一判据：目录里没有 bin/busybox 就说明这是未完成的容器，
+        // 失败时整棵删掉；已有可用容器的重装场景不动。
+        val hadUsableRootfs = File(rootfsDir, "bin/busybox").isFile
         rootfsDir.mkdirs()
-        val pb = ProcessBuilder(
-            "/system/bin/toybox", "tar", "-x", "-z", "-o",
-            "-f", tarGz.absolutePath, "-C", rootfsDir.absolutePath,
-        )
-        pb.redirectErrorStream(true)
-        val p = pb.start()
-        currentProcess = p
-        val finished = waitForProcess(p, 180)
-        if (!finished) killProcessTree(p)
-        if (currentProcess === p) currentProcess = null
-        // 中断优先：避免把「被打断」误报成解包失败
-        if (aborted) throw InstallationInterruptedException()
-        if (!finished) throw IOException("解包超时")
-        val out = try {
-            p.inputStream.bufferedReader().readText()
-        } catch (_: Exception) {
-            ""
-        }
-        if (p.exitValue() != 0) {
-            throw IOException("解包失败（exit=${p.exitValue()}）: ${out.take(200)}")
-        }
-        if (!File(rootfsDir, "bin/busybox").isFile) {
-            throw IOException("解包结果不完整（bin/busybox 缺失）")
+        var ok = false
+        try {
+            val pb = ProcessBuilder(
+                "/system/bin/toybox", "tar", "-x", "-z", "-o",
+                "-f", tarGz.absolutePath, "-C", rootfsDir.absolutePath,
+            )
+            pb.redirectErrorStream(true)
+            val p = pb.start()
+            currentProcess = p
+            val finished = waitForProcess(p, 180)
+            if (!finished) killProcessTree(p)
+            if (currentProcess === p) currentProcess = null
+            // 中断优先：避免把「被打断」误报成解包失败
+            if (aborted) throw InstallationInterruptedException()
+            if (!finished) throw IOException("解包超时")
+            val out = try {
+                p.inputStream.bufferedReader().readText()
+            } catch (_: Exception) {
+                ""
+            }
+            if (p.exitValue() != 0) {
+                throw IOException("解包失败（exit=${p.exitValue()}）: ${out.take(200)}")
+            }
+            if (!File(rootfsDir, "bin/busybox").isFile) {
+                throw IOException("解包结果不完整（bin/busybox 缺失）")
+            }
+            ok = true
+        } finally {
+            // 解包失败且本次没有可复用的容器：整棵删掉，避免半成品被 isInstalled() 误判为已安装
+            if (!ok && !hadUsableRootfs) deleteQuietly(rootfsDir)
         }
     }
 
     // ---- 网络配置 ----
 
     /**
-     * 构造 /etc/apk/repositories 内容：同一 base 必须同时含 main 与 community。
+     * 构造 /etc/apk/repositories 内容：同一 base 同时含 main 与 community。
      * 缺 community 会导致 util-linux、bash-completion 等社区包解析不到而安装失败。
      */
     private fun buildRepositoriesContent(base: String): String {
@@ -515,7 +669,13 @@ object AlpineInstaller {
 
     // ---- 首次安装：基础包与用户环境 ----
 
-    private fun prootProcess(context: Context, rootfsDir: File, prootDir: File, args: List<String>): ProcessBuilder {
+    private fun prootProcess(
+        context: Context,
+        rootfsDir: File,
+        prootDir: File,
+        args: List<String>,
+        proxy: String? = null,
+    ): ProcessBuilder {
         val pb = ProcessBuilder(
             listOf(
                 File(prootDir, "proot").absolutePath,
@@ -532,6 +692,14 @@ object AlpineInstaller {
             put("HOME", "/root")
             put("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
             put("LANG", "C")
+            // 代理只对本次命令生效，不改容器内任何持久化配置
+            val p = proxy?.trim().orEmpty()
+            if (p.isNotEmpty()) {
+                put("http_proxy", "http://$p")
+                put("https_proxy", "http://$p")
+                put("HTTP_PROXY", "http://$p")
+                put("HTTPS_PROXY", "http://$p")
+            }
         }
         return pb
     }
@@ -540,13 +708,18 @@ object AlpineInstaller {
     data class ExecResult(val finished: Boolean, val exitCode: Int, val output: String)
 
     /** 在 Alpine 容器内执行一条命令并收集输出（pmc 降级安装等场景复用）。 */
-    fun execInAlpine(context: Context, args: List<String>, timeoutSec: Long = 180): ExecResult {
+    fun execInAlpine(
+        context: Context,
+        args: List<String>,
+        timeoutSec: Long = 180,
+        proxy: String? = null,
+    ): ExecResult {
         if (aborted) return ExecResult(false, -1, "已中断")
         val files = context.filesDir
         val rootfsDir = File(files, "alpine")
         val prootDir = File(files, "proot")
         val p = try {
-            prootProcess(context, rootfsDir, prootDir, args).start()
+            prootProcess(context, rootfsDir, prootDir, args, proxy).start()
         } catch (e: Exception) {
             return ExecResult(false, -1, "启动失败: ${e.message}")
         }
@@ -566,25 +739,19 @@ object AlpineInstaller {
 
     /**
      * 首次安装自动装基础包：
-     *  1. 先并发测速挑出最快镜像（需求一），只把主源写入 repositories，避免 apk 多源反复卡死；
+     *  1. 先并发测速挑出最快镜像，只把主源写入 repositories，避免 apk 多源反复卡死；
      *  2. 主源失败时按测速耗时顺序依次回退；
      *  3. 每轮开始前检查中断标志。
-     * temporaryMirrors 非空时以其为候选源（仅本次引导）。
+     * 始终使用内置 Alpine 镜像源：用户填写的地址是 rootfs 仓库，不具备 apk 索引结构。
      */
     private fun installBasePackages(
         context: Context,
         rootfsDir: File,
         onProgress: (String) -> Unit,
-        temporaryMirrors: List<String> = emptyList(),
     ) {
         val reposFile = File(rootfsDir, "etc/apk/repositories")
 
-        // 候选源：临时源优先，否则用内置源表
-        val candidates: List<Pair<String, String>> = if (temporaryMirrors.isNotEmpty()) {
-            temporaryMirrors.map { it to it }
-        } else {
-            APK_SOURCES.map { (name, base) -> name to base }
-        }
+        val candidates: List<Pair<String, String>> = APK_SOURCES.map { (name, base) -> name to base }
         val urls = candidates.map { it.second }
 
         onProgress("  [测速] 并发探测 ${urls.size} 个镜像…\n")
@@ -669,11 +836,11 @@ object AlpineInstaller {
     }
     /**
      * 安装成功后恢复默认主源：把 /etc/apk/repositories 复原为内置默认源，
-     * 确保临时源不留痕（需求四红线：绝不持久化用户临时输入的源）。
+     * 使临时源不残留（临时源仅用于本次引导，不持久化）。
      */
     private fun restoreDefaultRepositories(rootfsDir: File) {
         try {
-            // ★ 建议二：写回稳定的国内源（中科大），而非连不上的官方 CDN
+            // 默认主源用中科大镜像
             File(rootfsDir, "etc/apk/repositories").writeText(
                 buildRepositoriesContent("https://mirrors.ustc.edu.cn/alpine/v3.24"),
             )

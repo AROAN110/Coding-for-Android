@@ -7,10 +7,18 @@
 
 ```sh
 cd <项目根>
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64   # 见下方 JDK 版本限制
+export PATH=$JAVA_HOME/bin:$PATH
 sh tools/build-apk.sh
 ```
 
-输出: `<项目根>/dist/Coding-for-Android-v1.0.1-mvp.apk`（可用 `CFA_OUT` 指定其他目录）
+输出: `<项目根>/dist/Coding-for-Android-v1.0.2-mvp.apk`（可用 `CFA_OUT` 指定其他目录）
+
+### JDK 版本限制
+
+kotlin-compiler 1.9.22 内部的版本解析器不认识 JDK 21 以上的版本号（报
+`IllegalArgumentException: 25.0.4.1`，来自 `JavaVersion.parse`），因此**必须用 JDK 17 执行构建**。
+JDK 17 的位置若不同，相应调整 `JAVA_HOME`。
 
 ## 工具链组成
 
@@ -20,7 +28,7 @@ sh tools/build-apk.sh
 | /opt/cfa-tools | android.jar（android-11 / SDK30）、r8-d8-8.3.37.jar |
 | 系统 | aapt2、zipalign、apksigner、keytool、javac（Ubuntu / JDK 自带） |
 
-⚠️ 坑位备忘: embeddable 版编译器必须手动补 `annotations-13.0.jar`，否则编译在 IR lowering 阶段崩溃
+⚠️ 注意: embeddable 版编译器需手动补 `annotations-13.0.jar`，否则编译在 IR lowering 阶段崩溃
 （报 `NoClassDefFoundError: org/jetbrains/annotations/NotNull`）。
 
 ## 环境重建（若 /opt 丢失）

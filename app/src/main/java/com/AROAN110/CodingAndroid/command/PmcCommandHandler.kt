@@ -13,7 +13,7 @@ import java.util.concurrent.Executors
  * pmc —— Coding for Android 的包管理指令（云端资源仓库入口）。
  *
  * 子命令：
- *   pmc install <pkg>      仓库检索优先，未命中自动降级 apk add
+ *   pmc install <pkg> [--proxy host:port]   仓库检索优先，未命中自动降级 apk add
  *   pmc uninstall <pkg>    卸载插件包（待完善）
  *   pmc pull               更新已安装资源（待完善）
  *   pmc list               拉取并预览仓库索引（index.json）
@@ -39,8 +39,8 @@ object PmcCommandHandler {
     private var repoUrl: String = ""
 
     private val NOT_CONFIGURED: String =
-        "pmc: 资源仓库地址未配置\n" +
-            "提示: 用 pmc repo set <url> 指定下载源\n"
+        "pmc: repository URL not configured\n" +
+            "Hint: use 'pmc repo set <url>' to specify a source\n"
 
     /** 在 Activity 创建时调用一次：加载持久化的仓库地址（无默认源）。 */
     fun attach(context: Context) {
@@ -68,35 +68,36 @@ object PmcCommandHandler {
                 if (repoUrl.isBlank()) return@runAsync NOT_CONFIGURED
                 val index = ResourceRepository.fetchIndex(repoUrl)
                 val preview = index.take(200).replace('\n', ' ')
-                "pmc: 索引拉取成功（${index.length} 字符）\n预览: $preview…\n"
+                "pmc: index fetched (${index.length} chars)\nPreview: $preview…\n"
             }
 
             "install" -> {
                 val pkg = args.getOrNull(2)
-                if (pkg.isNullOrBlank()) {
-                    sink("pmc: 缺少包名\n用法: pmc install <pkg>\n")
+                if (pkg.isNullOrBlank() || pkg.startsWith("--")) {
+                    sink("pmc: missing package name\nUsage: pmc install <pkg> [--proxy host:port]\n")
                 } else {
-                    runAsync(sink) { installPackage(pkg) }
+                    val proxy = parseProxyArg(args)
+                    runAsync(sink) { installPackage(pkg, proxy) }
                 }
             }
 
             "uninstall", "remove" -> {
                 val pkg = args.getOrNull(2)
                 if (pkg.isNullOrBlank()) {
-                    sink("pmc: 缺少包名\n用法: pmc uninstall <pkg>\n")
+                    sink("pmc: missing package name\nUsage: pmc uninstall <pkg>\n")
                 } else {
-                    sink("pmc: 卸载 '${pkg}' —— 本地已安装清单尚未接入（待完善）\n")
+                    sink("pmc: remove '$pkg' — local package database not implemented yet\n")
                 }
             }
 
-            "pull" -> sink("pmc: 更新已安装资源 —— 待完善\n")
+            "pull" -> sink("pmc: update installed resources — not implemented yet\n")
 
             "local-load" -> {
                 val path = args.getOrNull(2)
                 if (path.isNullOrBlank()) {
-                    sink("pmc: 缺少路径\n用法: pmc local-load <path>\n")
+                    sink("pmc: missing path\nUsage: pmc local-load <path>\n")
                 } else {
-                    sink("pmc: 从本地加载: ${path} —— 待完善（风险自负，维护者不审计）\n")
+                    sink("pmc: load from local: $path — not implemented yet (use at your own risk)\n")
                 }
             }
 
@@ -106,20 +107,28 @@ object PmcCommandHandler {
                     repoUrl = url
                     appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         ?.edit()?.putString(KEY_REPO_URL, url)?.apply()
-                    sink("pmc: 资源仓库地址已设定: $url\n")
+                    sink("pmc: repository URL set: $url\n")
                 } else {
-                    sink("pmc: 用法: pmc repo set <url>\n")
+                    sink("pmc: usage: pmc repo set <url>\n")
                 }
             }
 
-            else -> sink("pmc: 未知子命令 '${args.getOrNull(1)}'\n" + usage())
+            else -> sink("pmc: unknown subcommand '${args.getOrNull(1)}'\n" + usage())
         }
     }
 
     // —— 安装实现：仓库检索（index.json）优先，未命中自动降级 apk add ——
 
-    private fun installPackage(pkg: String): String {
-        val ctx = appContext ?: return "pmc: 内部错误（未初始化）\n"
+    /** 解析 --proxy host:port 参数；未提供或格式不完整返回 null（直连）。 */
+    private fun parseProxyArg(args: List<String>): String? {
+        val i = args.indexOf("--proxy")
+        if (i < 0) return null
+        val v = args.getOrNull(i + 1)?.trim().orEmpty()
+        return v.takeIf { it.isNotEmpty() && it.contains(':') }
+    }
+
+    private fun installPackage(pkg: String, proxy: String? = null): String {
+        val ctx = appContext ?: return "pmc: internal error (not initialized)\n"
         val bare = pkg.removeSuffix(".zip")
         val cacheDir = File(ctx.filesDir, RepositoryConfig.CACHE_DIR)
 
@@ -132,10 +141,10 @@ object PmcCommandHandler {
                     val sha = ResourceRepository.sha256(file)
                     val n = ResourceRepository.unzipPackage(file, File(cacheDir, bare))
                     return buildString {
-                        append("pmc: 仓库命中 '$bare'，已下载（${file.length()} 字节）\n")
+                        append("pmc: '$bare' found in repo, downloaded (${file.length()} bytes)\n")
                         append("pmc: SHA256 = $sha\n")
-                        append("pmc: 已解压 $n 个条目 → ${File(cacheDir, bare).absolutePath}\n")
-                        append("pmc: [TODO] install.sh 执行 / manifest.json 解析待完善\n")
+                        append("pmc: extracted $n entries → ${File(cacheDir, bare).absolutePath}\n")
+                        append("pmc: [TODO] install.sh execution / manifest.json parsing not implemented\n")
                     }
                 }
             } catch (_: Exception) {
@@ -144,7 +153,7 @@ object PmcCommandHandler {
         }
 
         // 第二档：容器内 apk add
-        return fallbackApkAdd(ctx, bare)
+        return fallbackApkAdd(ctx, bare, proxy)
     }
 
     /** index.json 中是否包含该包（兼容 "name" / "name.zip" 写法）。 */
@@ -154,17 +163,17 @@ object PmcCommandHandler {
     }
 
     /** 第二档：在 Alpine 容器内 apk add（apk 也找不到才最终报错）。 */
-    private fun fallbackApkAdd(ctx: Context, pkg: String): String {
+    private fun fallbackApkAdd(ctx: Context, pkg: String, proxy: String? = null): String {
         val r = try {
-            AlpineInstaller.execInAlpine(ctx, listOf("/sbin/apk", "add", "--no-cache", pkg), 180)
+            AlpineInstaller.execInAlpine(ctx, listOf("/sbin/apk", "add", "--no-cache", pkg), 180, proxy)
         } catch (e: Exception) {
-            return "pmc: 安装失败 —— 资源仓库未命中 '$pkg'，apk add 也无法执行: ${e.message}\n"
+            return "pmc: install failed — '$pkg' not in repo, apk add could not run: ${e.message}\n"
         }
         return if (r.finished && r.exitCode == 0) {
-            "pmc: 未在资源仓库命中 '$pkg'，已降级 apk add 安装 ✓\n" + r.output.takeLast(2000)
+            "pmc: '$pkg' not in repo, installed via apk add ✓\n" + r.output.takeLast(2000)
         } else {
-            val why = if (!r.finished) "超时" else "exit=${r.exitCode}"
-            "pmc: 安装失败 —— 资源仓库未命中 '$pkg'，apk add 也失败（$why）\n" + r.output.takeLast(1500)
+            val why = if (!r.finished) "timeout" else "exit=${r.exitCode}"
+            "pmc: install failed — '$pkg' not in repo, apk add failed ($why)\n" + r.output.takeLast(1500)
         }
     }
 
@@ -173,21 +182,23 @@ object PmcCommandHandler {
             val out = try {
                 block()
             } catch (e: Exception) {
-                "pmc: 失败 —— ${e.message}\n"
+                "pmc: failed — ${e.message}\n"
             }
             mainHandler.post { sink(out) }
         }
     }
 
     private fun usage(): String = """
-        pmc — Coding for Android 包管理指令
-        用法:
-          pmc install <pkg>       仓库检索优先（未命中自动降级 apk add）
-          pmc uninstall <pkg>     卸载插件包
-          pmc pull                更新已安装资源
-          pmc list                查看仓库索引
-          pmc local-load <path>   加载本地自定义包
-          pmc repo set <url>      配置资源仓库地址
-          pmc help                显示本帮助
+        pmc — package manager for Coding for Android
+        Usage:
+          pmc install <pkg> [--proxy host:port]   search repo first, fall back to apk add
+          pmc uninstall <pkg>                     remove an installed package
+          pmc pull                                update installed resources
+          pmc list                                show repository index
+          pmc local-load <path>                   load a local package
+          pmc repo set <url>                      set resource repository URL
+          pmc help                                show this help
+        Notes:
+          --proxy applies to this install only; omit to connect directly
         """.trimIndent() + "\n"
 }

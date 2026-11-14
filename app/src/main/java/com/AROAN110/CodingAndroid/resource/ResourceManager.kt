@@ -28,7 +28,7 @@ data class PluginInfo(
  *   filesDir/home/resources/&lt;资源包ID&gt;/manifest.json  (name, id, entry)
  *   filesDir/home/plugins/&lt;插件ID&gt;/manifest.json      (name, id, entry)
  *
- * 解析失败或字段缺失一律跳过并打日志，绝不抛出。
+ * 解析失败或字段缺失一律跳过并打日志，不抛出。
  */
 class ResourceManager(context: Context) {
 

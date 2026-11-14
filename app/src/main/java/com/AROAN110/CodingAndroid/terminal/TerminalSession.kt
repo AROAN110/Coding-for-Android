@@ -38,7 +38,7 @@ class TerminalSession(
 
     /**
      * Ctrl+C 上层拦截器：返回 true 表示已被上层消费（如打断安装），
-     * 不再向子进程发送信号。安装阶段由 MainActivity 挂上（需求三）。
+     * 不再向子进程发送信号。安装阶段由 MainActivity 挂上。
      */
     var interruptInterceptor: (() -> Boolean)? = null
 
@@ -94,7 +94,7 @@ class TerminalSession(
      * 权限不足（如 uid0 的 su 链）时退化为写入 0x03。
      */
     fun sendInterrupt() {
-        // 上层优先消费（安装打断等，需求三）
+        // 上层优先消费（安装打断等）
         if (interruptInterceptor?.invoke() == true) return
         // PTY 场景：^C 送进伪终端（正确的中断路径，会话不退出）
         if (preferCtrlByte) {

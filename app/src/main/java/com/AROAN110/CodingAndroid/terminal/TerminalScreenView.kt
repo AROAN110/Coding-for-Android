@@ -105,6 +105,28 @@ class TerminalScreenView @JvmOverloads constructor(
         render()
     }
 
+    /**
+     * 原地更新最后一行（进度行专用）。
+     * 若最后一行以 [prefix] 开头则整行替换，否则追加为新行。
+     * 用于下载进度这类高频刷新，避免刷屏。
+     */
+    fun updateLastLine(text: String, prefix: String) {
+        val follow = isNearBottom()
+        val body = sanitize(text).trimEnd('\n')
+        val lastNl = history.lastIndexOf("\n", history.length - 2)
+        val lineStart = if (lastNl < 0) 0 else lastNl + 1
+        val lastLine = history.substring(lineStart)
+        if (lastLine.startsWith(prefix)) {
+            history.setLength(lineStart)
+            history.append(body)
+        } else {
+            if (history.isNotEmpty() && !history.endsWith("\n")) history.append('\n')
+            history.append(body)
+        }
+        render()
+        if (follow) scrollToBottom()
+    }
+
     /** 插入文本到编辑行（光标处）。 */
     fun insertText(text: String) {
         if (text.isEmpty()) return
@@ -348,7 +370,7 @@ class TerminalScreenView @JvmOverloads constructor(
         t = t.replace("/bin/sh: can't access tty; job control turned off\n", "")
         t = t.replace(Regex("(?m)^bash: cannot set terminal process group.*\n"), "")
         t = t.replace(Regex("(?m)^bash: no job control in this shell.*\n"), "")
-        // script 伪终端会打印 started/done 横幅，静音之（需求二）
+        // script 伪终端会打印 started/done 横幅，静音之
         t = t.replace(Regex("(?m)^Script (started|done)[^\\n]*\\n?"), "")
         // PTY 输出把换行转成 CRLF，统一为 \n，避免屏幕错乱
         t = t.replace("\r\n", "\n").replace('\r', '\n')

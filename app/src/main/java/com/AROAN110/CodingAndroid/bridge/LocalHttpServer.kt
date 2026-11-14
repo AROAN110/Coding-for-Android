@@ -14,7 +14,7 @@ import kotlin.concurrent.thread
  *
  * 设计约束（已拍板）：
  *  - 纯 ServerSocket 手写 HTTP，零第三方依赖（标准库无 WebSocket 服务端）；
- *  - 端口随机（bind 0 由系统分配），仅监听 127.0.0.1，绝不对外暴露；
+ *  - 端口随机（bind 0 由系统分配），仅监听 127.0.0.1，不对外暴露；
  *  - 统一 JSON Router：请求 {"id":..,"action":..,"params":{..}}，回包固定 JSON。
  *
  * 本阶段只实现 ping 链路，用于验证 WebView ↔ Kotlin 通路。

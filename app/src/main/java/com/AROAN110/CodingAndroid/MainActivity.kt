@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -328,14 +329,21 @@ class MainActivity : Activity() {
                 return@post
             }
             awaitingMirror = true
+            // 对话框不继承 App 的深色主题，手动设色保证白底黑字可读
+            val fgColor = Color.parseColor("#000000")
+            val hintColor = Color.parseColor("#666666")
             val urlInput = EditText(this).apply {
-                hint = "https://github.com/AROAN110/CFA-resources"
+                hint = "https://raw.githubusercontent.com/AROAN110/CFA-resources/main"
                 setSingleLine(false)
                 minLines = 2
+                setTextColor(fgColor)
+                setHintTextColor(hintColor)
             }
             val proxyInput = EditText(this).apply {
                 hint = "127.0.0.1:7890（选填，留空则直连）"
                 setSingleLine(true)
+                setTextColor(fgColor)
+                setHintTextColor(hintColor)
             }
             val box = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -343,10 +351,12 @@ class MainActivity : Activity() {
                 setPadding(pad, pad / 2, pad, 0)
                 addView(TextView(this@MainActivity).apply {
                     text = "镜像地址（必填，多个用英文逗号分隔）"
+                    setTextColor(fgColor)
                 })
                 addView(urlInput)
                 addView(TextView(this@MainActivity).apply {
                     text = "代理端口（选填）"
+                    setTextColor(fgColor)
                     setPadding(0, pad / 2, 0, 0)
                 })
                 addView(proxyInput)
@@ -380,6 +390,18 @@ class MainActivity : Activity() {
                     latch.countDown()
                 }
                 .create()
+            mirrorDialog?.setOnShowListener { dlg ->
+                val d = dlg as AlertDialog
+                // 只统一文字色，背景沿用系统默认白底
+                d.findViewById<TextView>(android.R.id.message)?.setTextColor(fgColor)
+                // alertTitle 不在公开 SDK 资源表中，按名字查
+                val titleId = resources.getIdentifier("alertTitle", "id", "android")
+                if (titleId != 0) {
+                    d.findViewById<TextView>(titleId)?.setTextColor(fgColor)
+                }
+                d.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(fgColor)
+                d.getButton(AlertDialog.BUTTON_NEGATIVE)?.setTextColor(fgColor)
+            }
             mirrorDialog?.show()
         }
         try {

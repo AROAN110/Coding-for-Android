@@ -12,7 +12,7 @@ export PATH=$JAVA_HOME/bin:$PATH
 sh tools/build-apk.sh
 ```
 
-输出: `<项目根>/dist/Coding-for-Android-v1.0.2-mvp.apk`（可用 `CFA_OUT` 指定其他目录）
+输出: `<项目根>/dist/Coding-for-Android-v1.0.4-mvp.apk`（可用 `CFA_OUT` 指定其他目录）
 
 ### JDK 版本限制
 

@@ -24,14 +24,11 @@ import java.util.concurrent.TimeUnit
 object AlpineInstaller {
 
     /** 基础包安装源（按序强制迭代；每源自动补 /main + /community 两行）。 */
-    private val APK_SOURCES = listOf(
-        "官方 CDN" to "https://dl-cdn.alpinelinux.org/alpine/v3.24",
-        "清华" to "https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.24",
-        "阿里" to "https://mirrors.aliyun.com/alpine/v3.24",
-        "中科大" to "https://mirrors.ustc.edu.cn/alpine/v3.24",
-        "LeaseWeb" to "http://mirror.leaseweb.com/alpine/v3.24",
-        "Clarkson" to "http://mirror.clarkson.edu/alpine/v3.24",
-    )
+    /**
+     * 官方兜底源：Alpine 官方 CDN。
+     * 国内镜像对大文件传输不稳定（索引能拉、包本体常被掐），不再作为候选。
+     */
+    private const val OFFICIAL_CDN = "https://dl-cdn.alpinelinux.org/alpine/v3.24"
 
     /** 兜底下限：只用于挡住服务端返回的错误页（HTML 通常几百字节），不限制真实 rootfs 大小。 */
     private const val ROOTFS_MIN_BYTES = 100L * 1024L
@@ -39,8 +36,12 @@ object AlpineInstaller {
     /** index.json 提供 size 时的容差比例（服务端 gzip 重压缩可能导致轻微偏差）。 */
     private const val SIZE_TOLERANCE = 0.2
 
-    /** 默认 rootfs 下载源（维护者仓库，内含 index.json 与 rootfs 文件）。 */
-    private const val DEFAULT_ROOTFS_REPO = "https://github.com/AROAN110/CFA-resources"
+    /**
+     * 默认 rootfs 下载源（维护者仓库，内含 index.json 与 rootfs 文件）。
+     * 用 raw.githubusercontent.com 而非 github.com：后者只提供网页，拼接文件路径会 404。
+     */
+    private const val DEFAULT_ROOTFS_REPO =
+        "https://raw.githubusercontent.com/AROAN110/CFA-resources/main"
 
     /** 仓库索引文件名。 */
     private const val INDEX_FILE = "index.json"
@@ -59,6 +60,12 @@ object AlpineInstaller {
 
     /** 下载进度上报步长（字节），用于节流高频回调。 */
     private const val PROGRESS_STEP_BYTES = 256L * 1024L
+
+    /** 进度条宽度（字符数）。 */
+    private const val PROGRESS_BAR_WIDTH = 20
+
+    /** 进度行前缀，与 MainActivity 的分流判断保持一致，用于原地刷新而非追加。 */
+    private const val PROGRESS_PREFIX = "  进度:"
 
     // ---- 打断控制 ----
 
@@ -300,10 +307,10 @@ object AlpineInstaller {
         val rootfsDir = File(files, "alpine")
         if (!File(rootfsDir, "bin/busybox").isFile) {
             checkAbort()
-            onProgress("[安装] 下载 Alpine minirootfs（约 4MB）…\n")
+            onProgress("[安装] 下载 Alpine 容器镜像…\n")
             val tarGz = downloadRootfs(context, onProgress, temporaryMirrors, proxy)
             checkAbort()
-            onProgress("[安装] 解包 Alpine 容器（515 个条目）…\n")
+            onProgress("[安装] 解包 Alpine 容器…\n")
             try {
                 extractRootfs(tarGz, rootfsDir)
             } finally {
@@ -322,8 +329,13 @@ object AlpineInstaller {
         onProgress("[安装]验证 proot 可执行性（关键检测）…\n")
         smokeTest(context, rootfsDir, File(files, "proot"))
         checkAbort()
-        onProgress("[安装] 安装基础包（bash / coreutils / findutils / grep / sed / gawk / util-linux，需联网）…\n")
-        installBasePackages(context, rootfsDir, onProgress)
+        // 预装版 rootfs 已带基础工具，解包后直接可用；只有缺失时才联网装包
+        if (File(rootfsDir, "bin/bash").isFile) {
+            onProgress("[安装] 基础工具已随镜像预装，跳过联网安装 ✓\n")
+        } else {
+            onProgress("[安装] 安装基础包（bash / coreutils / findutils / grep / sed / gawk / util-linux，需联网）…\n")
+            installBasePackages(context, rootfsDir, onProgress)
+        }
         // 安装成功：恢复默认主源，清除本次临时源写入的痕迹
         restoreDefaultRepositories(rootfsDir)
         checkAbort()
@@ -385,20 +397,23 @@ object AlpineInstaller {
         proxy: String? = null,
     ): File {
         val dest = File(context.filesDir, "alpine-rootfs.tar.gz")
-        // 候选源：用户填写的优先，否则用维护者仓库
+        // 候选源：用户填写的优先，否则用维护者仓库；统一规整成可直接取文件的地址
         val bases: List<String> = if (temporaryMirrors.isNotEmpty()) {
-            temporaryMirrors
+            temporaryMirrors.map { normalizeRepoBase(it) }
         } else {
             listOf(DEFAULT_ROOTFS_REPO)
         }
         var lastErr = "未知错误"
         for (base in bases) {
             try {
-                onProgress("  源: $base\n")
+                val indexUrl = joinUrl(base, INDEX_FILE)
+                onProgress("  索引: $indexUrl\n")
                 val entry = resolveRootfs(base, proxy)
-                onProgress("  文件: ${entry.name}\n")
-                download(joinUrl(base, entry.name), dest, proxy) { done, total ->
-                    onProgress(progressLine(done, total))
+                val fileUrl = joinUrl(base, entry.name)
+                onProgress("  文件: $fileUrl\n")
+                val dlStart = System.currentTimeMillis()
+                download(fileUrl, dest, proxy) { done, total ->
+                    onProgress(progressLine(done, total, System.currentTimeMillis() - dlStart))
                 }
                 val len = dest.length()
                 if (!sizeAcceptable(len, entry.size)) {
@@ -441,6 +456,22 @@ object AlpineInstaller {
         base.trimEnd('/') + "/" + name.trimStart('/')
 
     /**
+     * 把用户填的仓库地址规整成可直接取文件的 base。
+     * 用户可能填网页地址（github.com/<user>/<repo>），该域名不提供文件内容，
+     * 自动映射到 raw.githubusercontent.com 的 main 分支；其他地址原样返回。
+     */
+    private fun normalizeRepoBase(raw: String): String {
+        val s = raw.trim().trimEnd('/')
+        val prefix = "https://github.com/"
+        if (!s.startsWith(prefix)) return s
+        val path = s.removePrefix(prefix)
+        // 只处理 <user>/<repo> 两段式，带 /tree/ 等后缀的交给用户自己填 raw 地址
+        val segs = path.split('/').filter { it.isNotEmpty() }
+        if (segs.size != 2) return s
+        return "https://raw.githubusercontent.com/${segs[0]}/${segs[1]}/main"
+    }
+
+    /**
      * 从仓库 index.json 读取 rootfs 条目（文件名 + 声明大小）。
      * 取 rootfs 数组第一项（约定为最新版）；索引不可用时抛出异常，交由上层换源。
      */
@@ -459,7 +490,8 @@ object AlpineInstaller {
         val conn = openConnection(url, proxy, 10_000, 10_000)
         try {
             val code = conn.responseCode
-            if (code !in 200..299) throw IOException("HTTP $code")
+            // 错误信息带上完整 URL，便于用户判断是地址填错还是网络不通
+            if (code !in 200..299) throw IOException("HTTP $code（$url）")
             return conn.inputStream.bufferedReader(Charsets.UTF_8).readText()
         } finally {
             conn.disconnect()
@@ -498,17 +530,16 @@ object AlpineInstaller {
     }
 
     /** 生成单行进度文本（由 View 层原地覆盖上一行）。 */
-    private fun progressLine(done: Long, total: Long): String {
+    private fun progressLine(done: Long, total: Long, elapsedMs: Long = 0): String {
+        val speed = if (elapsedMs > 500) formatBytes(done * 1000 / elapsedMs) + "/s" else "—"
         if (total <= 0) {
-            return "  进度: ${fmtMiB(done)} MiB\n"
+            return "$PROGRESS_PREFIX ${formatBytes(done)}  $speed\n"
         }
         val pct = (done * 100 / total).toInt().coerceIn(0, 100)
-        val filled = pct / 5
-        val bar = "#".repeat(filled) + "-".repeat(20 - filled)
-        return "  进度: [$bar] $pct%  ${fmtMiB(done)}/${fmtMiB(total)} MiB\n"
+        val filled = (pct * PROGRESS_BAR_WIDTH / 100).coerceIn(0, PROGRESS_BAR_WIDTH)
+        val bar = "#".repeat(filled) + "-".repeat(PROGRESS_BAR_WIDTH - filled)
+        return "$PROGRESS_PREFIX [$bar] $pct%  ${formatBytes(done)}/${formatBytes(total)}  $speed\n"
     }
-
-    private fun fmtMiB(bytes: Long): String = "%.1f".format(bytes / 1024.0 / 1024.0)
 
     private fun download(
         urlStr: String,
@@ -520,7 +551,8 @@ object AlpineInstaller {
         val conn = openConnection(urlStr, proxy, 8_000, 5_000)
         try {
             val code = conn.responseCode
-            if (code !in 200..299) throw IOException("HTTP $code")
+            // 错误信息带上完整 URL，便于用户判断是地址填错还是网络不通
+            if (code !in 200..299) throw IOException("HTTP $code（$urlStr）")
             val total = conn.contentLengthLong
             val buf = ByteArray(65_536)
             var done = 0L
@@ -616,6 +648,12 @@ object AlpineInstaller {
         return "$b/main\n$b/community\n"
     }
 
+    /** 离线版 repositories：源全部注释掉，apk 只读本地数据库，不会联网卡住。 */
+    private fun buildOfflineRepositoriesContent(): String {
+        val b = OFFICIAL_CDN.trimEnd('/')
+        return "#$b/main\n#$b/community\n"
+    }
+
     private fun configureRootfs(rootfsDir: File) {
         val etc = File(rootfsDir, "etc")
         etc.mkdirs()
@@ -625,10 +663,37 @@ object AlpineInstaller {
         )
         val apk = File(etc, "apk")
         apk.mkdirs()
-        File(apk, "repositories").writeText(
-            // 与 restoreDefaultRepositories 保持一致：默认主源用中科大
-            buildRepositoriesContent("https://mirrors.ustc.edu.cn/alpine/v3.24"),
+        // 默认离线：源写成注释状态，避免 apk list / version 这类查询命令联网卡住。
+        // 需要装包时用 apk-online 启用，或用 apk-offline 关回去。
+        File(apk, "repositories").writeText(buildOfflineRepositoriesContent())
+        writeApkSwitchers(rootfsDir)
+    }
+
+    /**
+     * 写入 apk-online / apk-offline 两个切换脚本。
+     * 默认离线是为了让 apk 查询类命令立即返回；装包前用 apk-online 打开官方源。
+     */
+    private fun writeApkSwitchers(rootfsDir: File) {
+        val binDir = File(rootfsDir, "usr/local/bin")
+        binDir.mkdirs()
+        val online = File(binDir, "apk-online")
+        online.writeText(
+            "#!/bin/sh\n" +
+                "# 取消注释官方源，允许 apk update / add 联网操作\n" +
+                "sed -i 's|^#\\(https\\)|\\1|' /etc/apk/repositories\n" +
+                "echo '已启用官方源，可执行 apk update'\n",
         )
+        val offline = File(binDir, "apk-offline")
+        offline.writeText(
+            "#!/bin/sh\n" +
+                "# 注释掉所有源，恢复离线模式（查询类命令不再联网）\n" +
+                "sed -i 's|^\\(https\\)|#\\1|' /etc/apk/repositories\n" +
+                "echo '已切换离线模式'\n",
+        )
+        for (f in listOf(online, offline)) {
+            f.setExecutable(true, false)
+            f.setReadable(true, false)
+        }
     }
 
     // ---- 冒烟测试：验证 proot 能真正执行（Android 10+ W^X 执行限制检测）----
@@ -738,11 +803,51 @@ object AlpineInstaller {
     }
 
     /**
-     * 首次安装自动装基础包：
-     *  1. 先并发测速挑出最快镜像，只把主源写入 repositories，避免 apk 多源反复卡死；
-     *  2. 主源失败时按测速耗时顺序依次回退；
+     * 带实时输出的容器命令执行：边跑边把输出行交给 onLine，用于装包阶段显示进度。
+     * 返回完整输出与退出码；超时或中断时 finished=false。
+     */
+    private fun execInAlpineStreaming(
+        context: Context,
+        args: List<String>,
+        timeoutSec: Long,
+        onLine: (String) -> Unit,
+    ): ExecResult {
+        if (aborted) return ExecResult(false, -1, "已中断")
+        val files = context.filesDir
+        val rootfsDir = File(files, "alpine")
+        val prootDir = File(files, "proot")
+        val p = try {
+            prootProcess(context, rootfsDir, prootDir, args, null).start()
+        } catch (e: Exception) {
+            return ExecResult(false, -1, "启动失败: ${e.message}")
+        }
+        currentProcess = p
+        val sb = StringBuilder()
+        val reader = Thread {
+            try {
+                p.inputStream.bufferedReader().forEachLine { line ->
+                    sb.append(line).append('\n')
+                    onLine(line)
+                }
+            } catch (_: Exception) {
+                // 进程被杀时流会提前关闭，忽略
+            }
+        }
+        reader.isDaemon = true
+        reader.start()
+        val finished = waitForProcess(p, timeoutSec)
+        if (!finished) killProcessTree(p)
+        reader.join(2_000)
+        if (currentProcess === p) currentProcess = null
+        if (aborted) return ExecResult(false, -1, "已中断")
+        return ExecResult(finished, if (finished) p.exitValue() else -1, sb.toString())
+    }
+
+    /**
+     * 首次安装自动装基础包，按「维护者仓库优先、官方 CDN 兜底」两段式执行：
+     *  1. 维护者仓库放在 GitHub raw，小文件稳定，作为首选；
+     *  2. 失败再试 Alpine 官方 CDN；
      *  3. 每轮开始前检查中断标志。
-     * 始终使用内置 Alpine 镜像源：用户填写的地址是 rootfs 仓库，不具备 apk 索引结构。
      */
     private fun installBasePackages(
         context: Context,
@@ -751,88 +856,146 @@ object AlpineInstaller {
     ) {
         val reposFile = File(rootfsDir, "etc/apk/repositories")
 
-        val candidates: List<Pair<String, String>> = APK_SOURCES.map { (name, base) -> name to base }
-        val urls = candidates.map { it.second }
-
-        onProgress("  [测速] 并发探测 ${urls.size} 个镜像…\n")
-        val fastest = selectFastestMirror(urls)
-        val ordered: List<Pair<String, String>> = if (fastest != null) {
-            onProgress("  [测速] 最快: $fastest\n")
-            candidates.filter { it.second == fastest } +
-                candidates.filter { it.second != fastest }
-        } else {
-            onProgress("  [测速] 无可用镜像，按默认顺序尝试\n")
-            candidates
-        }
+        // 维护者仓库的 apk 目录是自建索引，没有官方签名，需要 --allow-untrusted
+        val sources = listOf(
+            Triple("维护者仓库", joinUrl(DEFAULT_ROOTFS_REPO, "apk"), true),
+            Triple("官方 CDN", OFFICIAL_CDN, false),
+        )
 
         var lastErr = "未知错误"
-        for ((name, base) in ordered) {
-            // 生成变体：先试 HTTPS，如果 fail 自动强制回退 HTTP
-            val variants = mutableListOf<Pair<String, String>>()
-            variants.add(name to base)
-            if (base.startsWith("https://")) {
-                variants.add("$name[HTTP回退]" to ("http://" + base.removePrefix("https://")))
+        for ((name, base, untrusted) in sources) {
+            checkAbort()
+            onProgress("  源[$name] $base\n")
+            try {
+                reposFile.writeText(buildRepositoriesContent(base))
+            } catch (e: Exception) {
+                lastErr = "源配置写入失败（$name）: ${e.message}"
+                continue
             }
+            if (installFromCurrentRepo(context, rootfsDir, onProgress, name, untrusted)) {
+                return
+            }
+            lastErr = "$name 安装失败"
+        }
+        checkAbort()
+        throw IOException("所有下载源均失败：$lastErr")
+    }
 
-            for ((vName, vBase) in variants) {
-                checkAbort()
-                onProgress("  源[$vName] $vBase\n")
-                try {
-                    reposFile.writeText(buildRepositoriesContent(vBase))
-                } catch (e: Exception) {
-                    lastErr = "源配置写入失败（$vName）: ${e.message}"
-                    continue
-                }
+    /**
+     * 在当前 repositories 配置下装包：apk update → 装 bash → 装工具链。
+     * 返回 true 表示装成功。untrusted=true 时加 --allow-untrusted（本地仓库无官方签名）。
+     */
+    private fun installFromCurrentRepo(
+        context: Context,
+        rootfsDir: File,
+        onProgress: (String) -> Unit,
+        label: String,
+        untrusted: Boolean,
+    ): Boolean {
+        val trust = if (untrusted) listOf("--allow-untrusted") else emptyList()
 
-                // 1. 先跑 apk update
-            val upd = execInAlpine(
-                    context,
-                    listOf("/bin/busybox", "timeout", "10", "/sbin/apk", "update"),
-                    20,
-                )
-                checkAbort()
-                if (!upd.finished || upd.exitCode != 0) {
-                    lastErr = if (!upd.finished) "apk update 超时（$vName）"
-                              else "apk update 失败（$vName, exit=${upd.exitCode}）"
-                    onProgress("  [!] $lastErr\n")
-                    continue
-                }
+        val upd = execInAlpineStreaming(
+            context,
+            listOf("/bin/busybox", "timeout", "20", "/sbin/apk", "update") + trust,
+            30,
+        ) { line -> onProgress("    $line\n") }
+        checkAbort()
+        if (!upd.finished || upd.exitCode != 0) {
+            onProgress("  [!] apk update 失败（$label, exit=${upd.exitCode}）\n")
+            return false
+        }
 
-                // 2. 单独装 bash（体积小，最容易成功）
-                val addBash = execInAlpine(
-                    context,
-                    listOf("/sbin/apk", "add", "--no-cache", "bash"),
-                    300,
-                )
-                checkAbort()
-                if (!(addBash.finished && addBash.exitCode == 0)) {
-                    lastErr = if (!addBash.finished) "apk add bash 超时（$vName）"
-                              else "apk add bash 失败（$vName, exit=${addBash.exitCode}）"
-                    onProgress("  [!] $lastErr\n")
-                    continue
-                }
+        // 单独装 bash：体积小，最容易成功，失败能快速换源
+        if (!apkAddWithProgress(context, trust + listOf("bash"), onProgress, "$label · bash")) {
+            return false
+        }
 
-                // 3. 再装剩下的工具链
-                val addTools = execInAlpine(
-                    context,
-                    listOf(
-                        "/sbin/apk", "add", "--no-cache",
-                        "coreutils", "findutils", "grep", "sed", "gawk", "util-linux",
-                    ),
-                    300,
-                )
-                checkAbort()
-                if (addTools.finished && addTools.exitCode == 0 && File(rootfsDir, "bin/bash").isFile) {
-                    onProgress("  bash / coreutils / findutils / grep / sed / gawk / util-linux 就绪 ✓\n")
-                    return
-                }
-                lastErr = if (!addTools.finished) "apk add 工具链 超时（$vName）"
-                          else "apk add 工具链 失败（$vName, exit=${addTools.exitCode}）"
-                onProgress("  [!] $lastErr\n")
+        if (!apkAddWithProgress(
+                context,
+                trust + listOf("coreutils", "findutils", "grep", "sed", "gawk", "util-linux"),
+                onProgress,
+                "$label · 工具链",
+            )
+        ) {
+            return false
+        }
+        if (!File(rootfsDir, "bin/bash").isFile) {
+            onProgress("  [!] 装包完成但 bin/bash 缺失（$label）\n")
+            return false
+        }
+        onProgress("  bash / coreutils / findutils / grep / sed / gawk / util-linux 就绪 ✓\n")
+        return true
+    }
+
+    /**
+     * 执行 apk add 并把下载进度转成原地刷新的进度行。
+     * apk 的输出形如 `(3/22) Installing bash (5.3.9-r1)`，据此算已完成包数；
+     * 同时统计已下载字节数，按秒计算速度。
+     */
+    private fun apkAddWithProgress(
+        context: Context,
+        pkgs: List<String>,
+        onProgress: (String) -> Unit,
+        label: String,
+    ): Boolean {
+        val total = pkgs.size
+        var done = 0
+        var bytes = 0L
+        val startAt = System.currentTimeMillis()
+        var lastEmit = 0L
+
+        val res = execInAlpineStreaming(
+            context,
+            listOf("/sbin/apk", "add") + pkgs,
+            300,
+        ) { line ->
+            // 解析 `(n/m) Installing xxx` 与 `xxx (12%)` 两类进度信息
+            val m = Regex("""^\((\d+)/(\d+)\)""").find(line)
+            if (m != null) {
+                done = m.groupValues[1].toIntOrNull() ?: done
+                bytes += Regex("""\((\d+)\s*(KiB|MiB)\)""").find(line)
+                    ?.let { g ->
+                        val v = g.groupValues[1].toLongOrNull() ?: 0L
+                        if (g.groupValues[2] == "MiB") v * 1024 * 1024 else v * 1024
+                    } ?: 0L
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastEmit >= 250) {
+                lastEmit = now
+                onProgress(apkProgressLine(label, done, total, bytes, now - startAt))
             }
         }
         checkAbort()
-        throw IOException("所有镜像源均失败：$lastErr")
+        if (!(res.finished && res.exitCode == 0)) {
+            onProgress("  [!] apk add 失败（$label, exit=${res.exitCode}）\n")
+            return false
+        }
+        onProgress(apkProgressLine(label, total, total, bytes, System.currentTimeMillis() - startAt) + "\n")
+        return true
+    }
+
+    /** 装包阶段的进度行：包数进度 + 已下载体积 + 实时速度。 */
+    private fun apkProgressLine(
+        label: String,
+        done: Int,
+        total: Int,
+        bytes: Long,
+        elapsedMs: Long,
+    ): String {
+        val ratio = if (total > 0) done.toDouble() / total else 0.0
+        val filled = (ratio * PROGRESS_BAR_WIDTH).toInt().coerceIn(0, PROGRESS_BAR_WIDTH)
+        val bar = "#".repeat(filled) + "-".repeat(PROGRESS_BAR_WIDTH - filled)
+        val pct = (ratio * 100).toInt()
+        val size = formatBytes(bytes)
+        val speed = if (elapsedMs > 500) formatBytes(bytes * 1000 / elapsedMs) + "/s" else "—"
+        return "$PROGRESS_PREFIX [$bar] $pct%  $done/$total  $size  $speed  $label"
+    }
+
+    /** 字节数转人类可读（B / KiB / MiB）。 */
+    private fun formatBytes(v: Long): String = when {
+        v >= 1024L * 1024L -> String.format("%.1f MiB", v / 1024.0 / 1024.0)
+        v >= 1024L -> String.format("%.0f KiB", v / 1024.0)
+        else -> "$v B"
     }
     /**
      * 安装成功后恢复默认主源：把 /etc/apk/repositories 复原为内置默认源，
@@ -840,10 +1003,8 @@ object AlpineInstaller {
      */
     private fun restoreDefaultRepositories(rootfsDir: File) {
         try {
-            // 默认主源用中科大镜像
-            File(rootfsDir, "etc/apk/repositories").writeText(
-                buildRepositoriesContent("https://mirrors.ustc.edu.cn/alpine/v3.24"),
-            )
+            // 恢复成离线状态，与首次安装一致：避免残留的临时源
+            File(rootfsDir, "etc/apk/repositories").writeText(buildOfflineRepositoriesContent())
         } catch (_: Exception) {
         }
     }

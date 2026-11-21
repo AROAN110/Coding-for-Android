@@ -6,6 +6,8 @@ import android.os.Looper
 import com.AROAN110.CodingAndroid.env.AlpineInstaller
 import com.AROAN110.CodingAndroid.repo.RepositoryConfig
 import com.AROAN110.CodingAndroid.repo.ResourceRepository
+import com.AROAN110.CodingAndroid.resource.PackageInstaller
+import com.AROAN110.CodingAndroid.resource.PermissionGuard
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -86,7 +88,7 @@ object PmcCommandHandler {
                 if (pkg.isNullOrBlank()) {
                     sink("pmc: missing package name\nUsage: pmc uninstall <pkg>\n")
                 } else {
-                    sink("pmc: remove '$pkg' — local package database not implemented yet\n")
+                    runAsync(sink) { uninstallPackage(pkg) }
                 }
             }
 
@@ -97,9 +99,11 @@ object PmcCommandHandler {
                 if (path.isNullOrBlank()) {
                     sink("pmc: missing path\nUsage: pmc local-load <path>\n")
                 } else {
-                    sink("pmc: load from local: $path — not implemented yet (use at your own risk)\n")
+                    runAsync(sink) { installLocalZip(path) }
                 }
             }
+
+            "perm" -> handlePerm(args, sink)
 
             "repo" -> {
                 val url = args.getOrNull(3)
@@ -115,6 +119,116 @@ object PmcCommandHandler {
 
             else -> sink("pmc: unknown subcommand '${args.getOrNull(1)}'\n" + usage())
         }
+    }
+
+    // —— zip 包安装 / 卸载 / 授权 ——
+
+    /** 本地 zip 安装：校验 manifest → 按 type 落库。 */
+    private fun installLocalZip(path: String): String {
+        val f = File(path.trim())
+        if (!f.isFile) return "pmc: file not found: $path\n"
+        return try {
+            val r = PackageInstaller(appContext!!).installZip(f)
+            "pmc: installed ${r.type} '${r.id}' → ${r.dir.absolutePath}\n"
+        } catch (e: PackageInstaller.InstallException) {
+            "pmc: install failed — ${e.message}\n"
+        }
+    }
+
+    /** 卸载：按 id 删目录 + 清授权。 */
+    private fun uninstallPackage(pkg: String): String {
+        val installer = PackageInstaller(appContext ?: return "pmc: internal error (not initialized)\n")
+        val resRemoved = installer.uninstall("resource", pkg)
+        val plugRemoved = installer.uninstall("plugin", pkg)
+        return if (resRemoved || plugRemoved) {
+            "pmc: uninstalled '$pkg'\n"
+        } else {
+            "pmc: package not found: $pkg\n"
+        }
+    }
+
+    /** pmc perm 子指令：grant / revoke / list。 */
+    private fun handlePerm(args: List<String>, sink: (String) -> Unit) {
+        val ctx = appContext ?: run {
+            sink("pmc: internal error (not initialized)\n")
+            return
+        }
+        when (args.getOrNull(2)) {
+            "grant", "revoke" -> {
+                val pkg = args.getOrNull(3)
+                val permsArg = args.getOrNull(4)
+                if (pkg.isNullOrBlank() || permsArg.isNullOrBlank()) {
+                    sink("pmc: usage: pmc perm grant <pkg> <perm[,perm2...]|all>\n")
+                    return
+                }
+                runAsync(sink) {
+                    val declared = findDeclared(ctx, pkg)
+                    if (declared == null) return@runAsync "pmc: package not found: $pkg\n"
+                    val perms = if (permsArg == "all") {
+                        declared.filter { PermissionGuard.isDangerous(it) }
+                    } else {
+                        permsArg.split(',', '，').map { it.trim() }.filter { it.isNotEmpty() }
+                    }
+                    if (perms.isEmpty()) return@runAsync "pmc: no grantable permissions to $permsArg\n"
+                    val err = if (args[2] == "grant") {
+                        PermissionGuard.grant(ctx, pkg, perms, declared)
+                    } else {
+                        PermissionGuard.revoke(ctx, pkg, perms, declared)
+                    }
+                    if (err != null) "pmc: $err\n"
+                    else "pmc: ${args[2]}ed ${perms.joinToString(",")} for $pkg\n"
+                }
+            }
+
+            "list" -> {
+                val pkg = args.getOrNull(3)
+                runAsync(sink) {
+                    if (pkg.isNullOrBlank()) {
+                        // 列出所有已装包及权限概况
+                        val lines = mutableListOf("pmc: packages:")
+                        val resRoot = File(ctx.filesDir, "home/resources")
+                        val plugRoot = File(ctx.filesDir, "home/plugins")
+                        for (root in listOf(resRoot to "resource", plugRoot to "plugin")) {
+                            val dirs = root.first.listFiles()?.filter { it.isDirectory } ?: emptyList()
+                            for (d in dirs) {
+                                val declared = PermissionGuard.declaredOf(d)
+                                val grants = PermissionGuard.grantedSet(ctx, d.name)
+                                lines.add("  [${root.second}] ${d.name}: declared=${declared.joinToString(",")} granted=${grants.joinToString(",")}")
+                            }
+                        }
+                        if (lines.size == 1) lines.add("  (none installed)")
+                        lines.joinToString("\n") + "\n"
+                    } else {
+                        val declared = findDeclared(ctx, pkg)
+                        if (declared == null) return@runAsync "pmc: package not found: $pkg\n"
+                        val grants = PermissionGuard.grantedSet(ctx, pkg)
+                        val sb = StringBuilder("pmc: $pkg\n")
+                        for (p in declared) {
+                            val level = if (PermissionGuard.isDangerous(p)) "dangerous" else "normal"
+                            val state = if (PermissionGuard.isDangerous(p) && p in grants) "granted" else "declared"
+                            sb.append("  $p ($level): $state\n")
+                        }
+                        sb.toString()
+                    }
+                }
+            }
+
+            else -> sink(
+                "pmc: usage:\n" +
+                    "  pmc perm grant <pkg> <perm[,perm2...]|all>\n" +
+                    "  pmc perm revoke <pkg> <perm[,perm2...]>\n" +
+                    "  pmc perm list [<pkg>]\n",
+            )
+        }
+    }
+
+    /** 在 resources / plugins 目录中找包的声明权限；找不到返回 null。 */
+    private fun findDeclared(ctx: Context, pkg: String): Set<String>? {
+        val res = File(ctx.filesDir, "home/resources/$pkg")
+        if (res.isDirectory) return PermissionGuard.declaredOf(res)
+        val plug = File(ctx.filesDir, "home/plugins/$pkg")
+        if (plug.isDirectory) return PermissionGuard.declaredOf(plug)
+        return null
     }
 
     // —— 安装实现：仓库检索（index.json）优先，未命中自动降级 apk add ——
@@ -192,13 +306,16 @@ object PmcCommandHandler {
         pmc — package manager for Coding for Android
         Usage:
           pmc install <pkg> [--proxy host:port]   search repo first, fall back to apk add
+          pmc local-load <path>                   install a local zip (resource or plugin)
           pmc uninstall <pkg>                     remove an installed package
-          pmc pull                                update installed resources
+          pmc perm grant <pkg> <perm[,perm2...]|all>   grant dangerous permissions
+          pmc perm revoke <pkg> <perm[,perm2...]>      revoke permissions
+          pmc perm list [<pkg>]                   show permission status
           pmc list                                show repository index
-          pmc local-load <path>                   load a local package
           pmc repo set <url>                      set resource repository URL
           pmc help                                show this help
         Notes:
           --proxy applies to this install only; omit to connect directly
+          zip packages need manifest.json (see docs/RESOURCE_AND_PLUGIN_SPEC.md)
         """.trimIndent() + "\n"
 }

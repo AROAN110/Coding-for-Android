@@ -106,7 +106,7 @@ class TerminalSession(
             write("\u0003")
             return
         }
-        val targets = mutableListOf<Int>()
+        val targets = HashSet<Int>()
         collectDescendants(rootPid, targets)
         if (targets.isEmpty()) targets.add(rootPid)
         var sent = false
@@ -163,8 +163,8 @@ class TerminalSession(
         }
     }
 
-    /** 递归收集 pid 的全部后代（读 /proc/<pid>/task/<tid>/children）。 */
-    private fun collectDescendants(pid: Int, out: MutableList<Int>) {
+    /** 递归收集 pid 的全部后代（读 /proc/<pid>/task/<tid>/children），HashSet 去重防环。 */
+    private fun collectDescendants(pid: Int, out: HashSet<Int>) {
         val taskDir = File("/proc/$pid/task")
         val tids = taskDir.listFiles() ?: return
         for (tid in tids) {
@@ -174,10 +174,8 @@ class TerminalSession(
                 continue
             }
             for (tok in children.trim().split(Regex("\\s+"))) {
-                if (tok.isEmpty()) continue
                 val c = tok.toIntOrNull() ?: continue
-                if (out.contains(c)) continue
-                out.add(c)
+                if (!out.add(c)) continue
                 collectDescendants(c, out)
             }
         }

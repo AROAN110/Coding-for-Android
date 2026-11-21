@@ -35,12 +35,13 @@ Coding for Android 是面向安卓平板的超轻量开发工作台。
   - **实时进度**：下载进度以单行原地刷新方式显示在终端，不刷屏；每 256KB 更新一次，避免拖慢界面。
   - **Ctrl+C 强制打断**：安装中途可按 `Ctrl+C` 阻断；被打断时自动清理半截文件与半解包目录，不会留下「假安装」状态。
   - **分步安装**：先装 `bash` 再装工具链，避免一次性下载大文件被运营商 QOS 掐断。
-- **Web 渲染层与插件桥接（v1.1 预埋）**：
-  - 内置 WebView 容器，预留 `window.__CFA_NATIVE__.send()` 原生 JS 桥，通过本地 Socket 与底层 Alpine 环境高频交互。
-  - 预埋 CWD 沙箱校验，为后续加载 HTML 资源包与插件提供安全环境。
-- **容器一步到位**：自动安装 bash / coreutils / findutils / grep / sed / gawk / util-linux，默认 shell 切换为 bash
-- **`pmc` 包管理**：插件仓库检索与一键安装，未命中时自动降级 `apk add`
-- **插件骨架**：可拖拽悬浮球，规划中的 `.zip` 插件体系
+- **Web 渲染层与资源包体系（v1.0.5）**：
+  - 内置 WebView 容器，可加载资源包（整站 HTML/CSS/JS）替换 Web 层界面。
+  - 资源包/插件模拟 APK 格式：manifest.json 声明 + 权限模型（普通权限声明即得，高危权限默认禁止）。
+  - 高危权限经终端 `pmc perm grant` 手动授权，su 恒拒——接口面写死在 App 层，资源包只能调用白名单 action。
+  - 详见 [docs/RESOURCE_AND_PLUGIN_SPEC.md](docs/RESOURCE_AND_PLUGIN_SPEC.md)。
+- **容器一步到位**：预装 Alpine rootfs（bash / coreutils / findutils / grep / sed / gawk / util-linux），默认离线模式，`apk-online` / `apk-offline` 切换
+- **`pmc` 包管理**：资源包/插件 zip 本地与仓库安装、权限管理，容器软件包自动降级 `apk add`
 
 ## 📥 安装
 
@@ -64,24 +65,26 @@ apk add python3 nodejs git vim …   # 想装什么就装什么
 |------|------|
 | `su` | 申请真 Root，进入真文件系统会话（`exit` 返回） |
 | `pmc help` | 查看包管理指令 |
-| `pmc install <pkg>` | 安装插件；未命中资源仓库时自动降级 `apk add` |
-| `pmc install <pkg> --proxy host:port` | 本次安装走指定 HTTP 代理（留空则直连） |
+| `pmc local-load <path>` | 安装本地资源包/插件 zip（按 manifest.json 校验落库） |
+| `pmc install <pkg>` | 仓库检索安装；未命中时自动降级 `apk add`（容器软件包） |
+| `pmc uninstall <pkg>` | 卸载资源包/插件，同时清除授权 |
+| `pmc perm grant <pkg> <perm\|all>` | 授予高危权限（逐个 / 逗号批量 / all） |
+| `pmc perm revoke <pkg> <perm>` | 撤销高危权限 |
+| `pmc perm list [<pkg>]` | 查看权限声明与授权状态 |
 | `pmc list` | 查看资源仓库索引 |
-| `pmc repo set <url>` | 指定你的插件仓库地址（不设默认源） |
+| `pmc repo set <url>` | 指定你的资源仓库地址（不设默认源） |
 | `pmc status` | 查看运行状态（环境 / 会话 / 容器） |
 | `Ctrl+C` | 打断当前安装，弹出输入框手动提供可用镜像源 |
 | 扩展键栏 | ESC / TAB / CTRL / ALT / 方向键 / HOME / END 等 |
+### 🔌 资源包与插件
+资源包（整站 HTML 界面）与插件（JS 增强）均以 `.zip` 分发，格式规范与权限模型见
+[docs/RESOURCE_AND_PLUGIN_SPEC.md](docs/RESOURCE_AND_PLUGIN_SPEC.md)。
 
-### 🔌 插件包规范（预留）
-
-插件以单个 `.zip` 独立分发。解包后根目录必须直接包含以下三个文件：
-
-| 文件 | 说明 |
-|------|------|
-| `manifest.json` | 插件声明：名称、版本、作者等元数据 |
-| `install.sh` | 安装脚本：安装时在容器内执行 |
-| `uninstall.sh` | 卸载脚本：卸载时在容器内执行 |
-> ⚠️ 插件脚本将在容器内执行，请仅安装你信任的插件（风险自负，维护者不审计）。
+要点：
+- zip 根目录必须有 `manifest.json`（type / id / entry / minAppVersion / permissions）；
+- 权限分级：普通权限声明即得；高危权限（terminal.write / shell）默认禁止，需 `pmc perm grant` 授权；`su` 恒拒；
+- 资源包只能调用 App 层写死的 action 白名单（fs / terminal / workspace / network），越界即报「资源包错误」；
+- 安装：`pmc local-load /sdcard/Download/xxx.zip`，悬浮球菜单加载资源包并勾选插件。
 
 ### 🏗 自建镜像仓库（可选）
 

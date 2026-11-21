@@ -73,7 +73,7 @@ Coding-for-Android/
 │   └── BUILD.md                  #   构建指南 + 环境重建 + 签名说明
 │
 └── dist/                         # 构建产物（.gitignore 忽略，不入库）
-    └── Coding-for-Android-v1.0.4-mvp.apk
+    └── Coding-for-Android-v1.0.5-mvp.apk
 ```
 
 ---
@@ -104,7 +104,7 @@ CFA_KS_PASS=<你的口令> \
 sh /sdcard/Download/Operit/project/Coding-for-Android/tools/build-apk.sh
 ```
 
-- 产物：`dist/Coding-for-Android-v1.0.4-mvp.apk`
+- 产物：`dist/Coding-for-Android-v1.0.5-mvp.apk`
 - 工具链位置：`/opt/kotlinc`、`/opt/cfa-tools`（重建方法见 `tools/BUILD.md`）
 - 签名：`CFA_KEYSTORE` / `CFA_KS_ALIAS` / `CFA_KS_PASS` 环境变量注入（**不写进脚本**）
 
@@ -141,7 +141,7 @@ sh /sdcard/Download/Operit/project/Coding-for-Android/tools/build-apk.sh
 
 ## 六、当前状态
 
-- 版本：**v1.0.4**（versionCode 4）
+- 版本：**v1.0.5**（versionCode 5）
 - 分支：`main`，远程 `https://github.com/AROAN110/Coding-for-Android.git`
 - 签名指纹：`23d83b7185f7a0f36864be20c6d069ea7a773de1489d64688ae6916d9cfe177a`
 - APK 体积：约 780KB（800,162 字节）

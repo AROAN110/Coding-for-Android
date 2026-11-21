@@ -30,6 +30,9 @@ class LocalHttpServer(
     var port: Int = -1
         private set
 
+    /** 本次运行的访问令牌：请求头 X-CFA-Token 必须匹配，防同设备其他 App 直连总线。 */
+    val token: String = generateToken()
+
     @Volatile
     private var running = false
     private var serverSocket: ServerSocket? = null
@@ -81,15 +84,24 @@ class LocalHttpServer(
                 val method = parts.getOrNull(0) ?: ""
                 val path = parts.getOrNull(1) ?: "/"
 
-                // 读头部，取 Content-Length
+                // 读头部，取 Content-Length 与访问令牌；限制行数与 body 大小，防畸形请求吃内存
                 var contentLength = 0
+                var headerLines = 0
+                var reqToken: String? = null
                 while (true) {
                     val line = reader.readLine() ?: break
                     if (line.isEmpty()) break
+                    if (++headerLines > MAX_HEADER_LINES) return@use
                     if (line.startsWith("Content-Length:", ignoreCase = true)) {
                         contentLength = line.substringAfter(":").trim().toIntOrNull() ?: 0
                     }
+                    if (line.startsWith("X-CFA-Token:", ignoreCase = true)) {
+                        reqToken = line.substringAfter(":").trim()
+                    }
                 }
+                if (contentLength > MAX_BODY_BYTES) return@use
+                // 令牌校验：不匹配直接断开（同设备其他 App 无 token 即被拒）
+                if (reqToken != token) return@use
 
                 // 读 body（JSON）：按 Content-Length 精确读满，不能只读 header 就返回
                 val body = if (contentLength > 0) {
@@ -130,9 +142,7 @@ class LocalHttpServer(
             append("HTTP/1.1 ${response.status} ${response.reason}\r\n")
             append("Content-Type: ${response.contentType}\r\n")
             append("Content-Length: ${bodyBytes.size}\r\n")
-            append("Access-Control-Allow-Origin: *\r\n")
-            append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n")
-            append("Access-Control-Allow-Headers: *\r\n")
+            // 同源策略收紧：令牌校验在请求侧已做，这里不再对任意 Origin 开放
             append("Connection: close\r\n")
             append("\r\n")
         }
@@ -144,5 +154,13 @@ class LocalHttpServer(
     companion object {
         private const val TAG = "CFA_HTTP"
         private const val LOOPBACK = "127.0.0.1"
+        private const val MAX_HEADER_LINES = 100
+        private const val MAX_BODY_BYTES = 1024 * 1024
+
+        private fun generateToken(): String {
+            val buf = ByteArray(32)
+            java.security.SecureRandom().nextBytes(buf)
+            return buf.joinToString("") { "%02x".format(it) }
+        }
     }
 }

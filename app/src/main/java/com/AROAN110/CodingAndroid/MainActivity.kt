@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -27,6 +28,7 @@ import com.AROAN110.CodingAndroid.env.AlpineInstaller
 import com.AROAN110.CodingAndroid.env.Environment
 import com.AROAN110.CodingAndroid.env.InstallationInterruptedException
 import com.AROAN110.CodingAndroid.resource.PluginInfo
+import com.AROAN110.CodingAndroid.repo.OfficialResourceFetcher
 import com.AROAN110.CodingAndroid.resource.ResourceManager
 import com.AROAN110.CodingAndroid.root.RootRequester
 import com.AROAN110.CodingAndroid.terminal.ExtraKeysView
@@ -55,7 +57,7 @@ class MainActivity : Activity() {
 
     // ---- Web 渲染层 / 通信总线（缺口一、二） ----
     private var httpServer: LocalHttpServer? = null
-    private val router = Router()
+    private val router = Router(this)
 
     /** 当前前台模式：true = Web 层，false = 终端层。切换不销毁任何一方。 */
     private var webMode = false
@@ -147,6 +149,10 @@ class MainActivity : Activity() {
         PmcCommandHandler.attach(this)
         resourceManager = ResourceManager(this)
         wireTerminal()
+        // Web 层 fs 沙箱指向 App 私有真实目录（/root 只在 proot 内存在，Android 侧不可用）
+        val webFs = File(filesDir, "webhome").apply { mkdirs() }
+        Router.currentCwd = webFs.absolutePath
+        Router.terminalHook = { line -> currentSession?.write(line + "\n") }
         wireExtraKeys()
         setupPluginBall()
         setupWebLayer()
@@ -162,6 +168,7 @@ class MainActivity : Activity() {
         // 强制打断仍在 AlpineInstaller.install() 阶段的后台线程，避免向已销毁视图投递输出
         AlpineInstaller.abortInstallation()
         httpServer?.stop()
+        Router.terminalHook = null
         suSession?.destroy()
         hostSession?.destroy()
         alpineSession?.destroy()
@@ -567,6 +574,7 @@ class MainActivity : Activity() {
 
         if (session == suSession) {
             suSession = null
+            buffers.remove(session)
             ensureBaseVisible()
             terminalView.appendOutput("[CFA] 已退出 Root，返回 ${baseEnv.label}\n")
             return
@@ -576,6 +584,7 @@ class MainActivity : Activity() {
             val usedScript = alpineSessionUsedScript
             val livedMs = System.currentTimeMillis() - alpineSessionStartedAt
             alpineSession = null
+            buffers.remove(session)
             if (suSession == null && baseEnv == Environment.ALPINE_CONTAINER) {
                 // PTY 降级：script 包 PTY 若秒退，判定该环境不支持，改直连 shell 重建
                 if (usedScript && livedMs in 0 until QUICK_EXIT_MS) {
@@ -602,6 +611,7 @@ class MainActivity : Activity() {
 
         if (session == hostSession) {
             hostSession = null
+            buffers.remove(session)
             if (baseEnv == Environment.HOST_SHELL) {
                 baseEnv = Environment.ALPINE_CONTAINER
                 if (suSession == null) {
@@ -614,10 +624,17 @@ class MainActivity : Activity() {
 
     private fun handleError(session: TerminalSession, message: String) {
         appendNote(session, "[CFA] ${session.environment.label}会话启动失败：$message\n")
-        if (session == alpineSession) alpineSession = null
-        if (session == hostSession) hostSession = null
+        if (session == alpineSession) {
+            alpineSession = null
+            buffers.remove(session)
+        }
+        if (session == hostSession) {
+            hostSession = null
+            buffers.remove(session)
+        }
         if (session == suSession) {
             suSession = null
+            buffers.remove(session)
             ensureBaseVisible()
         }
     }
@@ -666,10 +683,17 @@ class MainActivity : Activity() {
                 // 注入通信端口（保留：兼容旧页面 / 调试）
                 val p = httpServer?.port ?: -1
                 view?.evaluateJavascript("window.__CFA_PORT__ = $p;", null)
+                // 注入总线访问令牌（HTTP 通道校验用）
+                val tok = httpServer?.token ?: ""
+                view?.evaluateJavascript("window.__CFA_TOKEN__ = '$tok';", null)
                 // 注入全局原生桥对象：页面统一走 window.__CFA_NATIVE__.send(json)
                 view?.evaluateJavascript(NATIVE_BRIDGE_JS, null)
                 // 注入本次选中的插件
                 injectPlugins()
+                // 通知页面：桥注入完成（页面可监听 CFA_READY 事件启动）
+                view?.evaluateJavascript(
+                    "window.dispatchEvent(new Event('CFA_READY'));", null,
+                )
             }
         }
         loadResourcePage()
@@ -681,11 +705,34 @@ class MainActivity : Activity() {
         seedHomeFromAssets()
         val f = File(filesDir, "home/resources/default/index.html")
         if (f.isFile) {
+            lastResourceEntry = f.absolutePath
             webView.loadUrl("file://${f.absolutePath}")
         } else {
             Log.w(TAG_RES, "默认资源包缺失: ${f.absolutePath}")
+            fetchOfficialResource()
         }
     }
+
+    /** 默认资源包缺失时，从已配置的资源仓库后台拉取官方包，成功后重载页面。 */
+    private fun fetchOfficialResource() {
+        val repoUrl = getSharedPreferences("pmc", Context.MODE_PRIVATE)
+            .getString("repo_url", "").orEmpty()
+        if (repoUrl.isBlank()) {
+            Toast.makeText(this, "默认资源包缺失，且未配置资源仓库（pmc repo set <url>）", Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(this, "正在从仓库拉取官方资源包…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val r = OfficialResourceFetcher.fetchDefault(this, repoUrl)
+            runOnUiThread {
+                Toast.makeText(this, r.message, Toast.LENGTH_LONG).show()
+                if (r.installed) loadResourcePage()
+            }
+        }.start()
+    }
+
+    /** 最后一次加载的资源包入口（「重新加载 Web 页」用它，避免回落到默认页）。 */
+    private var lastResourceEntry: String? = null
 
     /** 首启：把 assets/home 整棵树铺到 filesDir/home（不覆盖已存在文件）。 */
     private fun seedHomeFromAssets() {
@@ -778,6 +825,7 @@ class MainActivity : Activity() {
             extraKeys.visibility = View.VISIBLE
             envBanner.visibility = View.VISIBLE
             webView.onPause()
+            terminalView.requestFocus()
         }
         Toast.makeText(this, if (toWeb) "已切至 Web 层" else "已切至终端层", Toast.LENGTH_SHORT).show()
     }
@@ -841,7 +889,12 @@ class MainActivity : Activity() {
                     0 -> switchLayer(!webMode)
                     1 -> openResourcePicker()
                     2 -> {
-                        loadResourcePage()
+                        val target = lastResourceEntry
+                        if (target != null) {
+                            webView.loadUrl("file://$target")
+                        } else {
+                            loadResourcePage()
+                        }
                         Toast.makeText(this, "Web 页已重载", Toast.LENGTH_SHORT).show()
                     }
                     3 -> Toast.makeText(
@@ -911,6 +964,7 @@ class MainActivity : Activity() {
     /** 第四步：加载资源包入口。 */
     private fun loadResource(entryPath: String) {
         try {
+            lastResourceEntry = entryPath
             webView.loadUrl("file://$entryPath")
             if (!webMode) switchLayer(true)
         } catch (e: Exception) {
@@ -930,10 +984,12 @@ class MainActivity : Activity() {
             } else {
                 terminalView.appendOutput("[CFA] 已在 Root 环境\n")
             }
+            currentSession?.write("\n")
             return
         }
 
-        // 2) pmc 指令：应用层处理（不进入 shell）
+        // 2) pmc 指令：应用层处理（不进入 shell）；
+        // 输出送达后补发换行，保证 shell 提示符出现在 pmc 输出之后
         if (PmcCommandHandler.handles(line)) {
             handlePmcCommand(line)
             return
@@ -1049,6 +1105,11 @@ class MainActivity : Activity() {
     // ================= pmc 指令（会话层） =================
 
     private fun handlePmcCommand(line: String) {
+        val sink: (String) -> Unit = { out ->
+            terminalView.appendOutput(out)
+            // pmc 输出打完补一个空行，让 shell 打出新提示符（输出可能异步，随到随补）
+            if (out.endsWith("\n")) currentSession?.write("\n")
+        }
         val args = line.trim().split(Regex("\\s+"))
         when (val sub = args.getOrNull(1)) {
             "install" -> {
@@ -1062,7 +1123,7 @@ class MainActivity : Activity() {
                         else -> startInstall(forcePrompt = true)
                     }
                 } else {
-                    PmcCommandHandler.handle(line) { out -> terminalView.appendOutput(out) }
+                    PmcCommandHandler.handle(line, sink)
                 }
             }
             "host", "alpine", "status" -> {
@@ -1084,7 +1145,7 @@ class MainActivity : Activity() {
                     "status" -> showStatus()
                 }
             }
-            else -> PmcCommandHandler.handle(line) { out -> terminalView.appendOutput(out) }
+            else -> PmcCommandHandler.handle(line, sink)
         }
     }
 
